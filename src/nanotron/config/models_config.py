@@ -134,6 +134,31 @@ class Starcoder2Config:
     @property
     def n_inner(self):
         return self.intermediate_size
+    
+@dataclass
+class Idefics2VisionConfig:
+    """Configuration for a Idefics2 vision model (Siglip modification)
 
+    Be careful on having a coherent typing as we use it to reconstruct the model from yaml
+    """
+    hidden_size: int = 768
+    image_size: int = 224
+    patch_size: int = 32
+    num_channels: int = 3
+    num_attention_heads: int = 12
+    num_key_value_heads: int = 12
+    is_using_mup: bool = False
+    intermediate_size: int = 3072
+    hidden_act: str = "gelu_pytorch_tanh"
+    layer_norm_eps: float = 1e-6
+    attention_dropout: float = 0.0
+    num_hidden_layers: int = 12
 
-NanotronConfigs = Union[LlamaConfig, Starcoder2Config, Any]
+@dataclass
+class Idefics2Config:
+    """Configuration for a Idefics2 model
+
+    Be careful on having a coherent typing as we use it to reconstruct the model from yaml
+    """
+    vision_config: Idefics2VisionConfig = Idefics2VisionConfig()
+    llama_config: LlamaConfig = LlamaConfig()

@@ -764,13 +764,15 @@ class LlamaModel(nn.Module):
         self,
         input_ids: Union[torch.Tensor, TensorPointer],  # [batch_size, seq_length]
         input_mask: Union[torch.Tensor, TensorPointer],  # [batch_size, seq_length]
+        input_embeds: Optional[torch.Tensor] = None,  # [seq_length, batch_size, hidden_size]
     ):
         # all tensors are optional as most ranks don't need anything from the dataloader.
 
-        output = self.token_position_embeddings(input_ids=input_ids, input_mask=input_mask)
+        if input_embeds is None:
+            input_embeds = self.token_position_embeddings(input_ids=input_ids, input_mask=input_mask)["input_embeds"]
 
         hidden_encoder_states = {
-            "hidden_states": output["input_embeds"],
+            "hidden_states": input_embeds,
             "sequence_mask": input_mask,
         }
         for encoder_block in self.decoder:
