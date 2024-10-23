@@ -1,3 +1,6 @@
+import sys
+sys.path.append('.venv/lib/python3.10/site-packages')
+
 import argparse
 from dataclasses import asdict
 import json
@@ -10,16 +13,143 @@ from nanotron.config.config import Config, GeneralArgs, LoggingArgs, ModelArgs, 
 from nanotron.config.models_config import ExistingCheckpointInit, Idefics2VisionConfig, Idefics2Config
 from nanotron.config.parallelism_config import ParallelismArgs
 from nanotron.logging import log_rank, set_ranks_logging_level
+from nanotron.config.models_config import LlamaConfig as LlamaConfigNanotron
 from nanotron.models.base import build_model
 from nanotron.models.idefics import Idefics2ForTraining, VisionTransformer
 from nanotron.parallel.context import ParallelContext
 from nanotron.parallel.parameters import sanity_check
 from nanotron.serialize.weights import save_weights
 from nanotron.trainer import mark_tied_parameters
-from tools.llama3.convert_hf_to_nanotron import copy_weights_from_hf_to_nanotron as copy_weights_from_hf_to_nanotron_llama
-from tools.llama3.convert_hf_to_nanotron import nanotron_config_from_hf_config as nanotron_config_from_hf_config_llama
+# from tools.llama3.convert_hf_to_nanotron import copy_weights_from_hf_to_nanotron as copy_weights_from_hf_to_nanotron_llama
+# from tools.llama3.convert_hf_to_nanotron import nanotron_config_from_hf_config as nanotron_config_from_hf_config_llama
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModel
+
+
+def copy_weights_from_hf_to_nanotron_llama(nanotron_model, hf_model, nanotron_llama_config):
+    # Copy params from HF to Nanotron
+    log_rank("Copying weights from HF model to Nanotron model...", logger=logger, level=logging.INFO, rank=0)
+    # Token embeddings
+    log_rank("Copying Token Embeddings...", logger=logger, level=logging.INFO, rank=0)
+    assert (
+        nanotron_model.token_position_embeddings.pp_block.token_embedding.weight.shape
+        == hf_model.model.embed_tokens.weight.shape
+    )
+    with torch.no_grad():
+        nanotron_model.token_position_embeddings.pp_block.token_embedding.weight.copy_(
+            hf_model.model.embed_tokens.weight
+        )
+
+    # Decoder layers
+    for i in tqdm(
+        range(nanotron_llama_config.num_hidden_layers),
+        desc="Copying Hidden Layers",
+        total=nanotron_llama_config.num_hidden_layers,
+    ):
+        # Input layer norm
+        assert (
+            hf_model.model.layers[i].input_layernorm.weight.shape
+            == nanotron_model.decoder[i].pp_block.input_layernorm.weight.shape
+        )
+        with torch.no_grad():
+            nanotron_model.decoder[i].pp_block.input_layernorm.weight.copy_(
+                hf_model.model.layers[i].input_layernorm.weight
+            )
+
+        # Self attn
+        ## QKV
+        tmp_qkv_proj = torch.cat(
+            [
+                hf_model.model.layers[i].self_attn.q_proj.weight,
+                hf_model.model.layers[i].self_attn.k_proj.weight,
+                hf_model.model.layers[i].self_attn.v_proj.weight,
+            ],
+            dim=0,
+        )
+        assert tmp_qkv_proj.shape == nanotron_model.decoder[i].pp_block.attn.qkv_proj.weight.shape
+        with torch.no_grad():
+            nanotron_model.decoder[i].pp_block.attn.qkv_proj.weight.copy_(tmp_qkv_proj)
+
+        ## O
+        assert (
+            hf_model.model.layers[i].self_attn.o_proj.weight.shape
+            == nanotron_model.decoder[i].pp_block.attn.o_proj.weight.shape
+        )
+        with torch.no_grad():
+            nanotron_model.decoder[i].pp_block.attn.o_proj.weight.copy_(
+                hf_model.model.layers[i].self_attn.o_proj.weight
+            )
+
+        # MLP
+        ## Gate Up Proj
+        tmp_gate_up_proj = torch.cat(
+            [
+                hf_model.model.layers[i].mlp.gate_proj.weight,
+                hf_model.model.layers[i].mlp.up_proj.weight,
+            ],
+            dim=0,
+        )
+
+        assert tmp_gate_up_proj.shape == nanotron_model.decoder[i].pp_block.mlp.gate_up_proj.weight.shape
+        with torch.no_grad():
+            nanotron_model.decoder[i].pp_block.mlp.gate_up_proj.weight.copy_(tmp_gate_up_proj)
+
+        ## Down Proj
+        assert (
+            hf_model.model.layers[i].mlp.down_proj.weight.shape
+            == nanotron_model.decoder[i].pp_block.mlp.down_proj.weight.shape
+        )
+        with torch.no_grad():
+            nanotron_model.decoder[i].pp_block.mlp.down_proj.weight.copy_(
+                hf_model.model.layers[i].mlp.down_proj.weight
+            )
+
+        # Post attn layer norm
+        assert (
+            hf_model.model.layers[i].post_attention_layernorm.weight.shape
+            == nanotron_model.decoder[i].pp_block.post_attention_layernorm.weight.shape
+        )
+        with torch.no_grad():
+            nanotron_model.decoder[i].pp_block.post_attention_layernorm.weight.copy_(
+                hf_model.model.layers[i].post_attention_layernorm.weight
+            )
+
+        # Last layer norm
+        log_rank("Copying Final Layer Norm...", logger=logger, level=logging.INFO, rank=0)
+        assert nanotron_model.final_layer_norm.pp_block.weight.shape == hf_model.model.norm.weight.shape
+        with torch.no_grad():
+            nanotron_model.final_layer_norm.pp_block.weight.copy_(hf_model.model.norm.weight)
+
+        # LM_Head
+        log_rank("Copying LM Head...", logger=logger, level=logging.INFO, rank=0)
+        assert nanotron_model.lm_head.pp_block.weight.shape == hf_model.lm_head.weight.shape
+        with torch.no_grad():
+            nanotron_model.lm_head.pp_block.weight.copy_(hf_model.lm_head.weight)
+
+def nanotron_config_from_hf_config_llama(hf_config):
+    return LlamaConfigNanotron(
+        bos_token_id=hf_config.bos_token_id,
+        eos_token_id=hf_config.eos_token_id,
+        hidden_act=hf_config.hidden_act,
+        hidden_size=hf_config.hidden_size,
+        initializer_range=hf_config.initializer_range,
+        intermediate_size=hf_config.intermediate_size,
+        is_llama_config=True,
+        max_position_embeddings=hf_config.max_position_embeddings,
+        num_attention_heads=hf_config.num_attention_heads,
+        num_hidden_layers=hf_config.num_hidden_layers,
+        num_key_value_heads=hf_config.num_key_value_heads,
+        pad_token_id=None,
+        pretraining_tp=hf_config.pretraining_tp,
+        rms_norm_eps=hf_config.rms_norm_eps,
+        rope_scaling=hf_config.rope_scaling,
+        rope_theta=hf_config.rope_theta,
+        rope_interleaved=False,
+        tie_word_embeddings=hf_config.tie_word_embeddings,
+        use_cache=hf_config.use_cache,
+        vocab_size=hf_config.vocab_size,
+    )
+
 
 
 logger = logging.get_logger(__name__)
@@ -222,7 +352,7 @@ def main(args):
 
     # Load Llama3-8B HF model
     log_rank(
-        f"Loading pretrained Llama3 Model: {args.pretrained_model_name_or_path}",
+        f"Loading pretrained Llama3 Model: {args.pretrained_model_name_or_path_llama3}",
         logger=logger,
         level=logging.INFO,
         rank=0,

@@ -162,3 +162,6 @@ class Idefics2Config:
     """
     vision_config: Idefics2VisionConfig = Idefics2VisionConfig()
     llama_config: LlamaConfig = LlamaConfig()
+
+
+NanotronConfigs = Union[LlamaConfig, Starcoder2Config, Idefics2Config, Idefics2VisionConfig]
