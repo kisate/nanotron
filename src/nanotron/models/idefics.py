@@ -8,6 +8,7 @@ from nanotron.config.config import Config
 from nanotron.config.models_config import RandomInit, SpectralMupInit
 from nanotron.config.parallelism_config import ParallelismArgs
 from nanotron.logging import log_rank
+from nanotron.models.base import NanotronModel
 from nanotron.nn.layer_norm import TritonLayerNorm
 from nanotron.parallel.context import ParallelContext
 from nanotron.parallel.parameters import NanotronParameter
@@ -33,8 +34,9 @@ class VisionEmbedding(nn.Module, AttachableStore):
     """
     Sharded implementation of the Idefics2VisionEmbeddings from huggingface for nanotron. Uses CLIPVit for megatron as a reference.
     """
-    def __init__(self, tp_gp: dist.ProcessGroup, config: Idefics2Config, parallel_config: Optional[ParallelismArgs]):
+    def __init__(self, tp_pg: dist.ProcessGroup, config: Idefics2Config, parallel_config: Optional[ParallelismArgs]):
         super().__init__()
+        self.tp_pg = tp_pg
         self.embed_dim = config.vision_config.hidden_size
         self.image_size = config.vision_config.image_size
         self.patch_size = config.vision_config.patch_size
@@ -55,7 +57,7 @@ class VisionEmbedding(nn.Module, AttachableStore):
             num_embeddings=self.num_positions,
             embedding_dim=self.embed_dim,
             padding_idx=config.llama_config.pad_token_id,
-            tp_gp=tp_gp,
+            pg=tp_pg,
             mode=parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE,
         )
 
@@ -129,7 +131,7 @@ class VisionCoreAttention(nn.Module):
             q=query_states,
             k=key_states,
             v=value_states,
-            dropout=dropout_rate,
+            dropout_p=dropout_rate,
             softmax_scale=softmax_scale,
             causal=causal,
             return_attn_probs=False,
@@ -188,7 +190,7 @@ class VisionSelfAttention(nn.Module, AttachableStore):
             config.num_attention_heads * self.d_qk + 2 * config.num_key_value_heads * self.d_qk,
             pg=tp_pg,
             mode=tp_mode,
-            bias=False,
+            bias=True,
             async_communication=tp_linear_async_communication,
             contiguous_chunks=qkv_contiguous_chunks,
             tp_recompute_allgather=parallel_config.tp_recompute_allgather
@@ -199,7 +201,7 @@ class VisionSelfAttention(nn.Module, AttachableStore):
             self.d_model,
             pg=tp_pg,
             mode=tp_mode,
-            bias=False,
+            bias=True,
             async_communication=tp_linear_async_communication,
         )
 
@@ -304,7 +306,7 @@ class VisionMLP(nn.Module):
             config.intermediate_size,
             pg=tp_pg,
             mode=tp_mode,
-            bias=False,
+            bias=True,
             async_communication=tp_linear_async_communication,
             contiguous_chunks=first_contiguous_chunks,
             tp_recompute_allgather=parallel_config.tp_recompute_allgather,
@@ -314,10 +316,10 @@ class VisionMLP(nn.Module):
             config.hidden_size,
             pg=tp_pg,
             mode=tp_mode,
-            bias=False,
+            bias=True,
             async_communication=tp_linear_async_communication and tp_mode is TensorParallelLinearMode.REDUCE_SCATTER,
         )
-        self.act = torch.compile(GLUActivation(config.hidden_act))
+        self.act = torch.compile(lambda x: nn.functional.gelu(x, approximate="tanh"))
 
     def forward(self, hidden_states):  # [seq_length, batch_size, hidden_dim]
         merged_states = self.fc1(hidden_states)
@@ -376,9 +378,9 @@ class VisionEncoderLayer(nn.Module):
 
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
-        output = self.mlp(hidden_states=hidden_states)["hidden_states"]
+        hidden_states = self.mlp(hidden_states=hidden_states)["hidden_states"]
 
-        hidden_states = output + residual
+        hidden_states = hidden_states + residual
 
         return {
             "hidden_states": hidden_states,
@@ -408,11 +410,11 @@ class VisionTransformer(nn.Module):
                 "tp_pg": parallel_context.tp_pg,
             },
             module_input_keys={
-                "pixel_values": "pixel_values",
-                "patch_attention_mask": "patch_attention_mask",
+                "pixel_values",
+                "patch_attention_mask"
             },
             module_output_keys={
-                "embeddings": "embeddings",
+                "embeddings"
             }
         )
 
@@ -427,12 +429,12 @@ class VisionTransformer(nn.Module):
                         "tp_pg": parallel_context.tp_pg,
                     },
                     module_input_keys={
-                        "hidden_states": "hidden_states",
-                        "sequence_mask": "sequence_mask",
+                        "hidden_states",
+                        "sequence_mask",
                     },
                     module_output_keys={
-                        "hidden_states": "hidden_states",
-                        "sequence_mask": "sequence_mask",
+                        "hidden_states",
+                        "sequence_mask"
                     }
                 )
 
@@ -443,15 +445,12 @@ class VisionTransformer(nn.Module):
         self.post_layernorm = PipelineBlock(
             p2p=self.p2p,
             module_builder=TritonLayerNorm,
-            module_kwargs={
-                "hidden_size": config.vision_config.hidden_size,
-                "eps": config.vision_config.layer_norm_eps,
-            },
+            module_kwargs={"normalized_shape": config.vision_config.hidden_size, "eps": config.vision_config.layer_norm_eps},
             module_input_keys={
-                "hidden_states": "hidden_states",
+                "input"
             },
             module_output_keys={
-                "hidden_states": "hidden_states",
+                "hidden_states"
             }
         )
 
@@ -490,7 +489,7 @@ class VisionTransformer(nn.Module):
             hidden_encoder_states = encoder_layer(**hidden_encoder_states)
 
         hidden_states = hidden_encoder_states["hidden_states"]
-        hidden_states = self.post_layernorm(hidden_states)
+        hidden_states = self.post_layernorm(input=hidden_states)
         
         return hidden_states
     
@@ -500,7 +499,7 @@ class VisionTransformer(nn.Module):
         d_qkv = config.hidden_size // config.num_attention_heads
 
         return {
-            VisionEncoderLayer: 4 * config.num_attention_heads * d_qkv * model_config.hidden_size
+            VisionEncoderLayer: 4 * config.num_attention_heads * d_qkv * config.hidden_size
             + 3 * d_ff * config.hidden_size
         }
 
@@ -561,6 +560,7 @@ class Idefics2Model(nn.Module):
         super().__init__()
 
         self.config = config
+        self.image_token_id = config.image_token_id
 
         self.llama = LlamaModel(
             config=config.llama_config,
@@ -584,10 +584,10 @@ class Idefics2Model(nn.Module):
                 "tp_pg": parallel_context.tp_pg,
             },
             module_input_keys={
-                "hidden_states": "hidden_states",
+                "hidden_states",
             },
             module_output_keys={
-                "hidden_states": "hidden_states",
+                "hidden_states"
             }
         )
         
@@ -645,15 +645,15 @@ class Idefics2Model(nn.Module):
 
         # Modality projection & resampling
         image_hidden_states = self.connector(
-            image_hidden_states, attention_mask=patch_attention_mask.view(pixel_values.size(0), -1)
+            hidden_states=image_hidden_states
         )
 
         inputs_embeds = self.llama.token_position_embeddings(input_ids=input_ids, input_mask=input_mask)
 
         inputs_embeds = self.inputs_merger(
             input_ids=input_ids,
-            inputs_embeds=inputs_embeds,
-            image_hidden_states=image_hidden_states,
+            inputs_embeds=inputs_embeds["input_embeds"],
+            image_hidden_states=image_hidden_states["hidden_states"],
         )
 
         outputs = self.llama.forward_with_hidden_states(
@@ -674,7 +674,7 @@ class Idefics2Model(nn.Module):
 
     
 
-class Idefics2ForTraining(nn.Module):
+class Idefics2ForTraining(NanotronModel):
     def __init__(
         self,
         config: Idefics2Config,
@@ -791,3 +791,10 @@ class Idefics2ForTraining(nn.Module):
 
     def get_block_compute_costs(self):
         return self.model.get_block_compute_costs()
+
+    def get_embeddings_lm_head_tied_names(self):
+        """Get the names of the tied embeddings and lm_head weights"""
+        if self.config.llama_config.tie_word_embeddings is True:
+            return ["model.llama.token_position_embeddings.pp_block.token_embedding.weight", "model.llama.lm_head.pp_block.weight"]
+        else:
+            return []

@@ -160,8 +160,10 @@ class Idefics2Config:
 
     Be careful on having a coherent typing as we use it to reconstruct the model from yaml
     """
-    vision_config: Idefics2VisionConfig = Idefics2VisionConfig()
-    llama_config: LlamaConfig = LlamaConfig()
+    vision_config: Idefics2VisionConfig
+    llama_config: LlamaConfig
+
+    image_token_id: int = 32001
 
 
 NanotronConfigs = Union[LlamaConfig, Starcoder2Config, Idefics2Config, Idefics2VisionConfig]
