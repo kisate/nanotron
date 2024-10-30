@@ -33,7 +33,7 @@ class LlamaConfig:
     """
 
     bos_token_id: int = 1
-    eos_token_id: int = 2
+    eos_token_id: Union[int, List[int]] = 2
     hidden_act: str = "silu"
     hidden_size: int = 4096
     initializer_range: float = 0.02

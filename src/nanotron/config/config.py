@@ -423,6 +423,10 @@ def get_config_from_dict(
             for k, v in config_dict.items()
             if v is not None
         }
+    
+    print(
+        config_dict
+    )
     return from_dict(
         data_class=config_class,
         data=config_dict,
