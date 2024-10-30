@@ -119,7 +119,9 @@ def main(args):
     image_2 = Image.open(requests.get(url_2, stream=True).raw)
     images = [image_1, image_2]
 
-    processor = AutoProcessor.from_pretrained("HuggingFaceM4/Idefics3-8B-Llama3")
+    target_image_seq_len = int(((364 // nanotron_config.model.model_config.vision_config.patch_size) ** 2) / (nanotron_config.model.model_config.scale_factor**2))
+
+    processor = AutoProcessor.from_pretrained("HuggingFaceM4/Idefics3-8B-Llama3", image_seq_len=target_image_seq_len)
 
     text = processor.apply_chat_template(messages, add_generation_prompt=True)
     inputs = processor(images=images, text=text, return_tensors="pt").to(DEVICE)
@@ -130,7 +132,6 @@ def main(args):
 
     seq_length = inputs.input_ids.size(1)
 
-    print(inputs.keys())
 
     inputs = {
         "input_ids": inputs['input_ids'],

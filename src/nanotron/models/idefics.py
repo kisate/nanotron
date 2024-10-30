@@ -87,8 +87,7 @@ class VisionEmbedding(nn.Module, AttachableStore):
 
         position_ids = position_ids.to(self.position_embedding.weight.device)
         embeddings = embeddings + self.position_embedding(position_ids)
-
-        embeddings = embeddings.transpose(0, 1)
+        # embeddings = embeddings.transpose(0, 1)
 
         return {
             "embeddings": embeddings,
@@ -565,7 +564,7 @@ class Idefics3SimpleMLP(nn.Module):
         hidden_size = config.vision_config.hidden_size
 
         self.input_size = hidden_size * (config.scale_factor ** 2)
-        self.output_size = hidden_size
+        self.output_size = config.llama_config.hidden_size
 
         self.proj = TensorParallelColumnLinear(
             self.input_size,
@@ -711,10 +710,6 @@ class Idefics3Model(nn.Module):
             patch_attention_mask=patch_attention_mask,
         )["hidden_states"]
 
-        print(
-            image_hidden_states.shape,
-        )
-
         # Modality projection & resampling
         image_hidden_states = self.connector(
             hidden_states=image_hidden_states
@@ -724,13 +719,13 @@ class Idefics3Model(nn.Module):
 
         inputs_embeds = self.inputs_merger(
             input_ids=input_ids,
-            inputs_embeds=inputs_embeds["input_embeds"],
+            inputs_embeds=inputs_embeds["input_embeds"].transpose(0, 1),
             image_hidden_states=image_hidden_states["hidden_states"],
         )
 
         outputs = self.llama.forward_with_hidden_states(
             input_ids=None,
-            inputs_embeds=inputs_embeds,
+            input_embeds=inputs_embeds,
             input_mask=input_mask,
         )
 

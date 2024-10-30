@@ -1,5 +1,5 @@
 """
-torchrun --nproc-per-node 1 tools/idefics3/build_nanotron_from_hf.py --nanotron-checkpoint-path nanotron-ckpt --pretrained-model-name-or-path-llama3 meta-llama/Meta-Llama-3-8B-Instruct --pretrained-model-name-or-path-siglip google/siglip-base-patch16-224
+torchrun --nproc-per-node 1 tools/idefics3/build_nanotron_from_hf.py --nanotron-checkpoint-path nanotron-ckpt --pretrained-model-name-or-path-llama3 meta-llama/Meta-Llama-3-8B-Instruct --pretrained-model-name-or-path-siglip google/siglip-so400m-patch14-384
 """
 import sys
 sys.path.append('.venv/lib/python3.10/site-packages')
@@ -29,17 +29,19 @@ from nanotron.trainer import mark_tied_parameters
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModel
 
 
-def copy_weights_from_hf_to_nanotron_llama(nanotron_model, hf_model, nanotron_llama_config):
+def copy_weights_from_hf_to_nanotron_llama(nanotron_model, hf_model, nanotron_config, 
+    additional_vocab_size):
+    nanotron_llama_config = nanotron_config.llama_config
     # Copy params from HF to Nanotron
     log_rank("Copying weights from HF model to Nanotron model...", logger=logger, level=logging.INFO, rank=0)
     # Token embeddings
     log_rank("Copying Token Embeddings...", logger=logger, level=logging.INFO, rank=0)
     assert (
-        nanotron_model.token_position_embeddings.pp_block.token_embedding.weight.shape
+        nanotron_model.token_position_embeddings.pp_block.token_embedding.weight[:-additional_vocab_size].shape
         == hf_model.model.embed_tokens.weight.shape
     )
     with torch.no_grad():
-        nanotron_model.token_position_embeddings.pp_block.token_embedding.weight.copy_(
+        nanotron_model.token_position_embeddings.pp_block.token_embedding.weight[:-additional_vocab_size].copy_(
             hf_model.model.embed_tokens.weight
         )
 
@@ -125,11 +127,11 @@ def copy_weights_from_hf_to_nanotron_llama(nanotron_model, hf_model, nanotron_ll
 
         # LM_Head
         log_rank("Copying LM Head...", logger=logger, level=logging.INFO, rank=0)
-        assert nanotron_model.lm_head.pp_block.weight.shape == hf_model.lm_head.weight.shape
+        assert nanotron_model.lm_head.pp_block.weight[:-additional_vocab_size].shape == hf_model.lm_head.weight.shape
         with torch.no_grad():
-            nanotron_model.lm_head.pp_block.weight.copy_(hf_model.lm_head.weight)
+            nanotron_model.lm_head.pp_block.weight[:-additional_vocab_size].copy_(hf_model.lm_head.weight)
 
-def nanotron_config_from_hf_config_llama(hf_config):
+def nanotron_config_from_hf_config_llama(hf_config, additional_vocab_size=3):
     return LlamaConfigNanotron(
         bos_token_id=hf_config.bos_token_id,
         eos_token_id=hf_config.eos_token_id,
@@ -150,7 +152,7 @@ def nanotron_config_from_hf_config_llama(hf_config):
         rope_interleaved=False,
         tie_word_embeddings=hf_config.tie_word_embeddings,
         use_cache=hf_config.use_cache,
-        vocab_size=hf_config.vocab_size,
+        vocab_size=hf_config.vocab_size + additional_vocab_size,
     )
 
 
@@ -349,6 +351,7 @@ def copy_weights_from_hf_to_nanotron_siglip(
 
 
 def main(args):
+    additional_vocab_size = 4
     # Init Nanotron Parallel Utilities
     parallel_config = ParallelismArgs(dp=1, pp=1, tp=1)
 
@@ -373,8 +376,9 @@ def main(args):
     ).to(DEVICE)
     hf_config_llama = hf_model_llama.config
 
+
     # Set Nanotron LlamaConfig
-    nanotron_llama_config = nanotron_config_from_hf_config_llama(hf_config_llama)
+    nanotron_llama_config = nanotron_config_from_hf_config_llama(hf_config_llama, additional_vocab_size)
 
     # Load SigLIP HF model
     log_rank(
@@ -441,7 +445,8 @@ def main(args):
     copy_weights_from_hf_to_nanotron_llama(
         nanotron_model=nanotron_model.model.llama,
         hf_model=hf_model_llama,
-        nanotron_llama_config=nanotron_llama_config,
+        nanotron_config=nanotron_idefics3_config,
+        additional_vocab_size=additional_vocab_size
     )
 
     log_rank("Copied weights from HF Llama model to Nanotron model!", logger=logger, level=logging.INFO, rank=0)
