@@ -1,5 +1,5 @@
 """
-torchrun --nproc-per-node 2 tools/Idefics3/generate_nanotron_predictions.py --tp 2 --nanotron-checkpoint-path nanotron-ckpt
+torchrun --nproc-per-node 2 tools/idefics3/generate_nanotron_predictions.py --tp 2 --nanotron-checkpoint-path nanotron-ckpt
 """
 import argparse
 import os
@@ -20,7 +20,7 @@ from nanotron.parallel.tensor_parallel.nn import TensorParallelLinearMode
 from nanotron.serialize import load_weights
 from nanotron.trainer import mark_tied_parameters
 # from sklearn.metrics import accuracy_score
-from transformers import AutoTokenizer, Idefics3Processor
+from transformers import AutoTokenizer, AutoProcessor
 from PIL import Image
 
 
@@ -105,6 +105,9 @@ def main(args):
         device=DEVICE,  # TODO Check with different parallelism if cpu is available
     )
 
+    
+    #torch.Size([484, 26, 768])
+
     mark_tied_parameters(model=model, parallel_context=parallel_context)
     sanity_check(root_module=model)
 
@@ -116,9 +119,9 @@ def main(args):
     image_2 = Image.open(requests.get(url_2, stream=True).raw)
     images = [image_1, image_2]
 
-    processor = Idefics3Processor.from_pretrained("HuggingFaceM4/Idefics3-8b")
+    processor = AutoProcessor.from_pretrained("HuggingFaceM4/Idefics3-8B-Llama3")
 
-    text = processor.apply_chat_template(messages, add_generation_prompt=False)
+    text = processor.apply_chat_template(messages, add_generation_prompt=True)
     inputs = processor(images=images, text=text, return_tensors="pt").to(DEVICE)
 
     # labels = inputs.input_ids.clone()

@@ -567,17 +567,13 @@ class Idefics3SimpleMLP(nn.Module):
         self.input_size = hidden_size * (config.scale_factor ** 2)
         self.output_size = hidden_size
 
-        first_contiguous_chunks = (
-            self.input_size,  # shape of up_linear
-        )
         self.proj = TensorParallelColumnLinear(
             self.input_size,
-            hidden_size,
+            self.output_size,
             pg=tp_pg,
             mode=tp_mode,
             bias=False,
             async_communication=tp_linear_async_communication,
-            contiguous_chunks=first_contiguous_chunks,
             tp_recompute_allgather=parallel_config.tp_recompute_allgather,
         )
 
@@ -604,6 +600,7 @@ class Idefics3Connector(nn.Module):
     def pixel_shuffle(self, x, scale_factor=2):
         bsz, seq, embed_dim = x.size()
         height = width = int(seq**0.5)
+
         x = x.view(bsz, height, width, embed_dim)
         x = x.view(bsz, height, int(width / scale_factor), embed_dim * scale_factor)
         x = x.permute(0, 2, 1, 3)
@@ -713,6 +710,10 @@ class Idefics3Model(nn.Module):
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
         )["hidden_states"]
+
+        print(
+            image_hidden_states.shape,
+        )
 
         # Modality projection & resampling
         image_hidden_states = self.connector(

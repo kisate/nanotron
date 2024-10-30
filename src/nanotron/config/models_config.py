@@ -163,7 +163,8 @@ class Idefics3Config:
     vision_config: Idefics3VisionConfig
     llama_config: LlamaConfig
 
-    image_token_id: int = 32001
+    image_token_id: int = 128257
+    pad_token_id: int = 128_002
     scale_factor: int = 2
 
 
