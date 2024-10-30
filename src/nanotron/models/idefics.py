@@ -123,8 +123,7 @@ class VisionCoreAttention(nn.Module):
         # NOTE: this scale is for µTransfer,
         # in SP, we use sqrt(1/d_h)
         softmax_scale = 1 / query_states.shape[-1] if self.is_using_mup else None
-        # For now we are assuming that we use causual mask. No magic here
-        causal = True
+        causal = False
         dropout_rate = self.dropout if self.training else 0.0
         
         attn_output = flash_attn_func(
@@ -548,7 +547,75 @@ class Idefics2MLP(nn.Module):
         hidden_states = self.down_proj(self.split_silu_mul(merged_states))
         return {"hidden_states": hidden_states}
     
+class Idefics3SimpleMLP(nn.Module):
+    def __init__(
+        self,
+        config: Idefics2Config,
+        parallel_config: Optional[ParallelismArgs],
+        tp_pg: dist.ProcessGroup,
+    ):
+        super().__init__()
+
+        # TODO @thomasw21: refactor so that we store that default in a single place.
+        tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
+        tp_linear_async_communication = (
+            parallel_config.tp_linear_async_communication if parallel_config is not None else False
+        )
+
+        hidden_size = config.vision_config.hidden_size
+
+        self.input_size = hidden_size * (config.scale_factor ** 2)
+        self.output_size = hidden_size
+
+        first_contiguous_chunks = (
+            self.input_size,  # shape of up_linear
+        )
+        self.proj = TensorParallelColumnLinear(
+            self.input_size,
+            hidden_size,
+            pg=tp_pg,
+            mode=tp_mode,
+            bias=False,
+            async_communication=tp_linear_async_communication,
+            contiguous_chunks=first_contiguous_chunks,
+            tp_recompute_allgather=parallel_config.tp_recompute_allgather,
+        )
+
+    def forward(self, hidden_states):
+        hidden_states = self.proj(hidden_states)
+        return {"hidden_states": hidden_states}
     
+
+class Idefics3Connector(nn.Module):
+    def __init__(
+        self,
+        config: Idefics2Config,
+        parallel_config: Optional[ParallelismArgs],
+        tp_pg: dist.ProcessGroup,
+    ):
+        super().__init__()
+        self.scale_factor = config.scale_factor
+        self.modality_projector = Idefics3SimpleMLP(
+            config=config,
+            parallel_config=parallel_config,
+            tp_pg=tp_pg,
+        )
+
+    def pixel_shuffle(self, x, scale_factor=2):
+        bsz, seq, embed_dim = x.size()
+        height = width = int(seq**0.5)
+        x = x.view(bsz, height, width, embed_dim)
+        x = x.view(bsz, height, int(width / scale_factor), embed_dim * scale_factor)
+        x = x.permute(0, 2, 1, 3)
+        x = x.reshape(bsz, int(width / scale_factor), int(height / scale_factor), embed_dim * (scale_factor**2))
+        x = x.permute(0, 2, 1, 3)
+        x = x.reshape(bsz, int(seq / (scale_factor**2)), embed_dim * (scale_factor**2))
+        return x
+    
+    def forward(self, hidden_states):
+        hidden_states = self.pixel_shuffle(hidden_states, self.scale_factor)
+        hidden_states = self.modality_projector(hidden_states)["hidden_states"]
+        return {"hidden_states": hidden_states}
 
 class Idefics2Model(nn.Module):
     def __init__(
@@ -577,18 +644,22 @@ class Idefics2Model(nn.Module):
 
         self.connector = PipelineBlock(
             p2p=self.llama.p2p,
-            module_builder=Idefics2MLP,
+            module_builder=Idefics3Connector,
             module_kwargs={
-                "config": config.vision_config,
+                "config": config,
                 "parallel_config": parallel_config,
                 "tp_pg": parallel_context.tp_pg,
             },
             module_input_keys={
-                "hidden_states",
+                "hidden_states"
             },
             module_output_keys={
                 "hidden_states"
             }
+        )
+
+        self.image_seq_len = int(
+            ((config.vision_config.image_size // config.vision_config.patch_size) ** 2) / (config.scale_factor**2)
         )
         
     def inputs_merger(
@@ -669,9 +740,6 @@ class Idefics2Model(nn.Module):
         vision_cost = self.vision_model.get_block_compute_costs()
 
         return {**llama_cost, **vision_cost}
-
-
-
     
 
 class Idefics2ForTraining(NanotronModel):

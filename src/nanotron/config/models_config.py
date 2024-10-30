@@ -164,6 +164,7 @@ class Idefics2Config:
     llama_config: LlamaConfig
 
     image_token_id: int = 32001
+    scale_factor: int = 2
 
 
 NanotronConfigs = Union[LlamaConfig, Starcoder2Config, Idefics2Config, Idefics2VisionConfig]
