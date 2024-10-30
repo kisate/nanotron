@@ -1,5 +1,5 @@
 """
-torchrun --nproc-per-node 2 tools/idefics2/generate_nanotron_predictions.py --tp 2 --nanotron-checkpoint-path nanotron-ckpt
+torchrun --nproc-per-node 2 tools/Idefics3/generate_nanotron_predictions.py --tp 2 --nanotron-checkpoint-path nanotron-ckpt
 """
 import argparse
 import os
@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from nanotron.config import Config, ParallelismArgs, get_config_from_file
 from nanotron.models import build_model
-from nanotron.models.idefics import Idefics2ForTraining
+from nanotron.models.idefics import Idefics3ForTraining
 from nanotron.parallel import ParallelContext
 from nanotron.parallel.parameters import sanity_check
 from nanotron.parallel.pipeline_parallel.engine import AllForwardAllBackwardPipelineEngine
@@ -20,7 +20,7 @@ from nanotron.parallel.tensor_parallel.nn import TensorParallelLinearMode
 from nanotron.serialize import load_weights
 from nanotron.trainer import mark_tied_parameters
 # from sklearn.metrics import accuracy_score
-from transformers import AutoTokenizer, Idefics2Processor
+from transformers import AutoTokenizer, Idefics3Processor
 from PIL import Image
 
 
@@ -95,7 +95,7 @@ def main(args):
     )
 
     model = build_model(
-        model_builder=lambda: Idefics2ForTraining(
+        model_builder=lambda: Idefics3ForTraining(
             config=nanotron_config.model.model_config,
             parallel_context=parallel_context,
             parallel_config=parallel_config,
@@ -116,7 +116,7 @@ def main(args):
     image_2 = Image.open(requests.get(url_2, stream=True).raw)
     images = [image_1, image_2]
 
-    processor = Idefics2Processor.from_pretrained("HuggingFaceM4/idefics2-8b")
+    processor = Idefics3Processor.from_pretrained("HuggingFaceM4/Idefics3-8b")
 
     text = processor.apply_chat_template(messages, add_generation_prompt=False)
     inputs = processor(images=images, text=text, return_tensors="pt").to(DEVICE)

@@ -18,7 +18,7 @@ from nanotron.parallel.pipeline_parallel.tensor_pointer import TensorPointer
 from nanotron.parallel.tensor_parallel.enum import TensorParallelLinearMode
 from nanotron.parallel.tensor_parallel.nn import TensorParallelColumnLinear, TensorParallelEmbedding, TensorParallelRowLinear
 from nanotron.distributed import dist
-from nanotron.config import Idefics2VisionConfig, Idefics2Config
+from nanotron.config import Idefics3VisionConfig, Idefics3Config
 from nanotron.generation.generate_store import AttachableStore
 from nanotron.random import RandomStates, branch_random_state
 from nanotron.scaling.parametrization import SpectralMupParametrizator, StandardParametrizator
@@ -32,9 +32,9 @@ logger = logging.get_logger(__name__)
 
 class VisionEmbedding(nn.Module, AttachableStore):
     """
-    Sharded implementation of the Idefics2VisionEmbeddings from huggingface for nanotron. Uses CLIPVit for megatron as a reference.
+    Sharded implementation of the Idefics3VisionEmbeddings from huggingface for nanotron. Uses CLIPVit for megatron as a reference.
     """
-    def __init__(self, tp_pg: dist.ProcessGroup, config: Idefics2Config, parallel_config: Optional[ParallelismArgs]):
+    def __init__(self, tp_pg: dist.ProcessGroup, config: Idefics3Config, parallel_config: Optional[ParallelismArgs]):
         super().__init__()
         self.tp_pg = tp_pg
         self.embed_dim = config.vision_config.hidden_size
@@ -96,7 +96,7 @@ class VisionEmbedding(nn.Module, AttachableStore):
         
 
 class VisionCoreAttention(nn.Module):
-    def __init__(self, config: Idefics2VisionConfig, parallel_config: Optional[ParallelismArgs]):
+    def __init__(self, config: Idefics3VisionConfig, parallel_config: Optional[ParallelismArgs]):
         super().__init__()
         
         assert (
@@ -139,7 +139,7 @@ class VisionCoreAttention(nn.Module):
         return attn_output 
     
 class VisionSelfAttention(nn.Module, AttachableStore):
-    def __init__(self, config: Idefics2VisionConfig, parallel_config: Optional[ParallelismArgs],
+    def __init__(self, config: Idefics3VisionConfig, parallel_config: Optional[ParallelismArgs],
     tp_pg: dist.ProcessGroup):
         super().__init__()
 
@@ -285,7 +285,7 @@ class VisionSelfAttention(nn.Module, AttachableStore):
 class VisionMLP(nn.Module):
     def __init__(
             self,
-            config: Idefics2VisionConfig,
+            config: Idefics3VisionConfig,
             parallel_config: Optional[ParallelismArgs],
             tp_pg: dist.ProcessGroup,
     ):
@@ -330,7 +330,7 @@ class VisionMLP(nn.Module):
 class VisionEncoderLayer(nn.Module):
     def __init__(
         self,
-        config: Idefics2VisionConfig,
+        config: Idefics3VisionConfig,
         parallel_config: Optional[ParallelismArgs],
         tp_pg: dist.ProcessGroup
     ):
@@ -390,7 +390,7 @@ class VisionEncoderLayer(nn.Module):
 class VisionTransformer(nn.Module):
     def __init__(
         self, 
-        config: Idefics2Config,
+        config: Idefics3Config,
         p2p: P2P,
         parallel_context: ParallelContext,
         parallel_config: Optional[ParallelismArgs],
@@ -503,10 +503,10 @@ class VisionTransformer(nn.Module):
         }
 
 
-class Idefics2MLP(nn.Module):
+class Idefics3MLP(nn.Module):
     def __init__(
         self,
-        config: Idefics2VisionConfig,
+        config: Idefics3VisionConfig,
         parallel_config: Optional[ParallelismArgs],
         tp_pg: dist.ProcessGroup,
     ):
@@ -550,7 +550,7 @@ class Idefics2MLP(nn.Module):
 class Idefics3SimpleMLP(nn.Module):
     def __init__(
         self,
-        config: Idefics2Config,
+        config: Idefics3Config,
         parallel_config: Optional[ParallelismArgs],
         tp_pg: dist.ProcessGroup,
     ):
@@ -589,7 +589,7 @@ class Idefics3SimpleMLP(nn.Module):
 class Idefics3Connector(nn.Module):
     def __init__(
         self,
-        config: Idefics2Config,
+        config: Idefics3Config,
         parallel_config: Optional[ParallelismArgs],
         tp_pg: dist.ProcessGroup,
     ):
@@ -617,10 +617,10 @@ class Idefics3Connector(nn.Module):
         hidden_states = self.modality_projector(hidden_states)["hidden_states"]
         return {"hidden_states": hidden_states}
 
-class Idefics2Model(nn.Module):
+class Idefics3Model(nn.Module):
     def __init__(
         self,
-        config: Idefics2Config,
+        config: Idefics3Config,
         parallel_context: ParallelContext,
         parallel_config: Optional[ParallelismArgs],
     ):
@@ -742,16 +742,16 @@ class Idefics2Model(nn.Module):
         return {**llama_cost, **vision_cost}
     
 
-class Idefics2ForTraining(NanotronModel):
+class Idefics3ForTraining(NanotronModel):
     def __init__(
         self,
-        config: Idefics2Config,
+        config: Idefics3Config,
         parallel_context: ParallelContext,
         parallel_config: Optional[ParallelismArgs],
     ):
         super().__init__()
 
-        self.model = Idefics2Model(
+        self.model = Idefics3Model(
             config=config,
             parallel_context=parallel_context,
             parallel_config=parallel_config,

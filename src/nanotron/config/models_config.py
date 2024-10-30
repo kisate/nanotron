@@ -136,8 +136,8 @@ class Starcoder2Config:
         return self.intermediate_size
     
 @dataclass
-class Idefics2VisionConfig:
-    """Configuration for a Idefics2 vision model (Siglip modification)
+class Idefics3VisionConfig:
+    """Configuration for a Idefics3 vision model (Siglip modification)
 
     Be careful on having a coherent typing as we use it to reconstruct the model from yaml
     """
@@ -155,16 +155,16 @@ class Idefics2VisionConfig:
     num_hidden_layers: int = 12
 
 @dataclass
-class Idefics2Config:
-    """Configuration for a Idefics2 model
+class Idefics3Config:
+    """Configuration for a Idefics3 model
 
     Be careful on having a coherent typing as we use it to reconstruct the model from yaml
     """
-    vision_config: Idefics2VisionConfig
+    vision_config: Idefics3VisionConfig
     llama_config: LlamaConfig
 
     image_token_id: int = 32001
     scale_factor: int = 2
 
 
-NanotronConfigs = Union[LlamaConfig, Starcoder2Config, Idefics2Config, Idefics2VisionConfig]
+NanotronConfigs = Union[LlamaConfig, Starcoder2Config, Idefics3Config, Idefics3VisionConfig]
