@@ -14,6 +14,7 @@ import torch
 
 from transformers import AutoProcessor, AutoModelForVision2Seq
 from transformers.image_utils import load_image
+from transformers.modeling_flash_attention_utils import _flash_attention_forward
 
 DEVICE = torch.device("cuda")
 TORCH_DTYPE = torch.bfloat16
@@ -82,6 +83,234 @@ def forward_embedding(
         embeddings = embeddings + self.position_embedding(position_ids)
         return embeddings
 
+def forward_attn(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.LongTensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        layer_idx: int = 0,
+        **kwargs,
+    ):
+        output_attentions = False
+
+        bsz, q_len, _ = hidden_states.size()
+
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
+
+        combined = torch.cat([key_states, value_states, query_states], dim=-1)
+
+        torch.save(combined, f"img_emb_hf_{layer_idx}_qkv.pt")
+
+        # Flash attention requires the input to have the shape
+        # batch_size x seq_length x head_dim x hidden_dim
+        # therefore we just need to keep the original shape
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim)
+        key_states = key_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        kv_seq_len = key_states.shape[-2]
+        if past_key_value is not None:
+            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+
+        # TODO: These transpose are quite inefficient but Flash Attention requires the layout [batch_size, sequence_length, num_heads, head_dim]. We would need to refactor the KV cache
+        # to be able to avoid many of these transpose/reshape/view.
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
+
+        dropout_rate = self.dropout if self.training else 0.0
+
+        # In PEFT, usually we cast the layer norms in float32 for training stability reasons
+        # therefore the input hidden states gets silently casted in float32. Hence, we need
+        # cast them back in the correct dtype just to be sure everything works as expected.
+        # This might slowdown training & inference so it is recommended to not cast the LayerNorms
+        # in fp32. (Idefics2VisionRMSNorm handles it correctly)
+
+        input_dtype = query_states.dtype
+        if input_dtype == torch.float32:
+            if torch.is_autocast_enabled():
+                target_dtype = torch.get_autocast_gpu_dtype()
+            # Handle the case where the model is quantized
+            elif hasattr(self.config, "_pre_quantization_dtype"):
+                target_dtype = self.config._pre_quantization_dtype
+            else:
+                target_dtype = self.q_proj.weight.dtype
+
+            # logger.warning_once(
+            #     f"The input hidden states seems to be silently casted in float32, this might be related to"
+            #     f" the fact you have upcasted embedding or layer norm layers in float32. We will cast back the input in"
+            #     f" {target_dtype}."
+            # )
+
+            query_states = query_states.to(target_dtype)
+            key_states = key_states.to(target_dtype)
+            value_states = value_states.to(target_dtype)
+
+        torch.save(query_states, f"img_emb_hf_{layer_idx}_query_states.pt")
+        torch.save(key_states, f"img_emb_hf_{layer_idx}_key_states.pt")
+        torch.save(value_states, f"img_emb_hf_{layer_idx}_value_states.pt")
+        torch.save(attention_mask, f"img_emb_hf_{layer_idx}_attention_mask.pt")
+        torch.save((q_len, dropout_rate, self.is_causal, self._flash_attn_uses_top_left_mask), f"img_emb_hf_{layer_idx}_args.pt")
+
+        attn_output = _flash_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            q_len,
+            dropout=dropout_rate,
+            is_causal=self.is_causal,
+            use_top_left_mask=self._flash_attn_uses_top_left_mask,
+        )
+
+        attn_output = attn_output.reshape(bsz, q_len, self.embed_dim).contiguous()
+        
+        
+        torch.save(attn_output, f"img_emb_hf_{layer_idx}_attn_output.pt")
+        
+        attn_output = self.out_proj(attn_output)
+
+        if not output_attentions:
+            attn_weights = None
+
+        return attn_output, attn_weights
+
+
+def forward_encoder_layer(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        layer_idx: int,
+        output_attentions: Optional[bool] = False,
+    ):
+        """
+        Args:
+            hidden_states (`torch.FloatTensor`):
+                Input to the layer of shape `(batch, seq_len, embed_dim)`.
+            attention_mask (`torch.FloatTensor`):
+                Attention mask of shape `(batch, 1, q_len, k_v_seq_len)` where padding elements are indicated by very large negative values.
+            output_attentions (`bool`, *optional*, defaults to `False`):
+                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+                returned tensors for more detail.
+        """
+        residual = hidden_states
+
+        torch.save(hidden_states, f"img_emb_hf_{layer_idx}_before_ln1.pt")
+
+        hidden_states = self.layer_norm1(hidden_states)
+
+        torch.save(hidden_states, f"img_emb_hf_{layer_idx}_after_ln1.pt")
+
+        hidden_states, attn_weights = forward_attn(
+            self.self_attn,
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            output_attentions=output_attentions,
+            layer_idx=layer_idx,
+        )
+
+        torch.save(hidden_states, f"img_emb_hf_{layer_idx}_after_attn.pt")
+
+        hidden_states = residual + hidden_states
+
+        torch.save(hidden_states, f"img_emb_hf_{layer_idx}_before_ln2.pt")
+
+        residual = hidden_states
+        hidden_states = self.layer_norm2(hidden_states)
+
+        torch.save(hidden_states, f"img_emb_hf_{layer_idx}_after_ln2.pt")
+
+        hidden_states = self.mlp(hidden_states)
+
+        torch.save(hidden_states, f"img_emb_hf_{layer_idx}_after_mlp.pt")
+
+        hidden_states = residual + hidden_states
+
+        outputs = (hidden_states,)
+
+        if output_attentions:
+            outputs += (attn_weights,)
+
+        return outputs
+
+# Ignore copy
+def forward_encoder(
+    self,
+    inputs_embeds,
+    attention_mask: Optional[torch.Tensor] = None,
+    output_attentions: Optional[bool] = None,
+    output_hidden_states: Optional[bool] = None,
+    return_dict: Optional[bool] = None,
+):
+    r"""
+    Args:
+        inputs_embeds (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`):
+            Optionally, instead of passing `input_ids` you can choose to directly pass an embedded representation.
+            This is useful if you want more control over how to convert `input_ids` indices into associated vectors
+            than the model's internal embedding lookup matrix.
+        attention_mask (`torch.Tensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Mask to avoid performing attention on padding token indices. Mask values selected in `[0, 1]`:
+
+            - 1 for tokens that are **not masked**,
+            - 0 for tokens that are **masked**.
+
+            [What are attention masks?](../glossary#attention-mask)
+        output_attentions (`bool`, *optional*):
+            Whether or not to return the attentions tensors of all attention layers. See `attentions` under
+            returned tensors for more detail.
+        output_hidden_states (`bool`, *optional*):
+            Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
+            for more detail.
+        return_dict (`bool`, *optional*):
+            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
+    """
+    output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+    output_hidden_states = (
+        output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+    )
+    return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+    encoder_states = () if output_hidden_states else None
+    all_attentions = () if output_attentions else None
+
+    hidden_states = inputs_embeds
+    for i, encoder_layer in enumerate(self.layers):
+        if output_hidden_states:
+            encoder_states = encoder_states + (hidden_states,)
+        if self.gradient_checkpointing and self.training:
+            layer_outputs = self._gradient_checkpointing_func(
+                encoder_layer.__call__,
+                hidden_states,
+                attention_mask,
+                output_attentions,
+            )
+        else:
+            layer_outputs = forward_encoder_layer(
+                encoder_layer,
+                hidden_states,
+                attention_mask,
+                layer_idx=i,
+                output_attentions=output_attentions,
+            )
+
+        hidden_states = layer_outputs[0]
+
+        torch.save(hidden_states, f"img_emb_hf_{i}.pt")
+
+        if output_attentions:
+            all_attentions = all_attentions + (layer_outputs[1],)
+
+    if output_hidden_states:
+        encoder_states = encoder_states + (hidden_states,)
+
+    if not return_dict:
+        return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
+    return hidden_states, encoder_states, all_attentions
+
 
 def forward_vision(
     self,
@@ -110,6 +339,8 @@ def forward_vision(
             patch_attention_mask = patch_attention_mask.to(dtype=torch.bool, device=pixel_values.device)
 
         hidden_states = forward_embedding(self.embeddings, pixel_values=pixel_values, patch_attention_mask=patch_attention_mask)
+        
+        torch.save(hidden_states, "img_emb_hf.pt")
 
         patch_attention_mask = patch_attention_mask.view(batch_size, -1)
         # The call to `_upad_input` in `_flash_attention_forward` is expensive
@@ -120,7 +351,8 @@ def forward_vision(
         elif not self._use_flash_attention_2:
             patch_attention_mask = _prepare_4d_attention_mask(patch_attention_mask, hidden_states.dtype)
 
-        encoder_outputs = self.encoder(
+        encoder_outputs = forward_encoder(
+            self.encoder,
             inputs_embeds=hidden_states,
             attention_mask=patch_attention_mask,
             output_attentions=output_attentions,
@@ -179,6 +411,9 @@ def forward(
         if inputs_embeds is None:
             inputs_embeds = self.text_model.get_input_embeddings()(input_ids).to(self.device)
 
+
+            torch.save(inputs_embeds, "inputs_embeds_hf.pt")
+
         # START VISUAL INPUTS INTEGRATION
         if pixel_values is not None and image_hidden_states is not None:
             raise ValueError("You cannot specify both pixel_values and image_hidden_states at the same time")
@@ -211,12 +446,17 @@ def forward(
             patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
             patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
 
+            torch.save(pixel_values, "pv_hf.pt")
+
             # Get sequence from the vision encoder
             image_hidden_states = forward_vision(
                 self.vision_model,
                 pixel_values=pixel_values,
                 patch_attention_mask=patch_attention_mask,
             )
+
+
+            torch.save(image_hidden_states, "img_hid_hf.pt")
 
             # Modality projection & resampling  
             image_hidden_states = self.connector(image_hidden_states)
@@ -248,7 +488,7 @@ def forward(
         if not return_dict:
             return tuple(v for v in [*outputs, image_hidden_states] if v is not None)
 
-        return None
+        return outputs
 
 
 
@@ -269,17 +509,26 @@ def main(args):
     text = processor.apply_chat_template(messages, add_generation_prompt=True)
     inputs = processor(images=images, text=text, return_tensors="pt").to(DEVICE)
 
-
+    print(
+        model.model.config
+    )
 
     with torch.no_grad():
         # output = model(**inputs)
 
-        forward(
+        output = forward(
             model.model,
             use_cache=False,
             **inputs
         )
 
+    print(output)
+    print(output.last_hidden_state.shape)
+
+    torch.save(
+        output,
+        "hf_output.pt",
+    )
 
 
 if __name__ == "__main__":

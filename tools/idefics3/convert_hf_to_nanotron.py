@@ -224,11 +224,18 @@ def copy_weights_from_hf_to_nanotron_vision(
         with torch.no_grad():
             nanotron_model.encoder[i].pp_block.layer_norm1.weight.copy_(hf_model.encoder.layers[i].layer_norm1.weight)
 
+        assert (
+            nanotron_model.encoder[i].pp_block.layer_norm1.bias.shape == hf_model.encoder.layers[i].layer_norm1.bias.shape
+        )
+
+        with torch.no_grad():
+            nanotron_model.encoder[i].pp_block.layer_norm1.bias.copy_(hf_model.encoder.layers[i].layer_norm1.bias)
+
         tmp_qkv_proj = torch.cat(
             [
+                hf_model.encoder.layers[i].self_attn.q_proj.weight,
                 hf_model.encoder.layers[i].self_attn.k_proj.weight,
                 hf_model.encoder.layers[i].self_attn.v_proj.weight,
-                hf_model.encoder.layers[i].self_attn.q_proj.weight,
             ],
             dim=0,
         )
@@ -242,9 +249,9 @@ def copy_weights_from_hf_to_nanotron_vision(
         
         tmp_qkv_proj_bias = torch.cat(
             [
+                hf_model.encoder.layers[i].self_attn.q_proj.bias,
                 hf_model.encoder.layers[i].self_attn.k_proj.bias,
                 hf_model.encoder.layers[i].self_attn.v_proj.bias,
-                hf_model.encoder.layers[i].self_attn.q_proj.bias,
             ],
             dim=0,
         )
@@ -280,6 +287,13 @@ def copy_weights_from_hf_to_nanotron_vision(
 
         with torch.no_grad():
             nanotron_model.encoder[i].pp_block.layer_norm2.weight.copy_(hf_model.encoder.layers[i].layer_norm2.weight)
+
+        assert (
+            nanotron_model.encoder[i].pp_block.layer_norm2.bias.shape == hf_model.encoder.layers[i].layer_norm2.bias.shape
+        )
+
+        with torch.no_grad():
+            nanotron_model.encoder[i].pp_block.layer_norm2.bias.copy_(hf_model.encoder.layers[i].layer_norm2.bias)
 
         # MLP
         ## FC1
@@ -343,11 +357,11 @@ def copy_weights_from_hf_to_nanotron_connector(
     log_rank("Copying weights from Idefic3 Connector to Nanotron model...", logger=logger, level=logging.INFO, rank=0)
 
     assert (
-        nanotron_model.connector.pp_block.modality_projector.proj.weight.shape == hf_model.connector.modality_projection.proj.weight.shape
+        nanotron_model.connector.modality_projector.pp_block.proj.weight.shape == hf_model.connector.modality_projection.proj.weight.shape
     )
 
     with torch.no_grad():
-        nanotron_model.connector.pp_block.modality_projector.proj.weight.copy_(hf_model.connector.modality_projection.proj.weight)
+        nanotron_model.connector.modality_projector.pp_block.proj.weight.copy_(hf_model.connector.modality_projection.proj.weight)
 
     log_rank("Copied Connector", logger=logger, level=logging.INFO, rank=0)
 

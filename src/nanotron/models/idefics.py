@@ -24,7 +24,7 @@ from nanotron.random import RandomStates, branch_random_state
 from nanotron.scaling.parametrization import SpectralMupParametrizator, StandardParametrizator
 from nanotron.utils import checkpoint_method
 from nanotron.models.llama import GLUActivation, LlamaModel, pad_to_right, Loss
-
+from transformers.modeling_flash_attention_utils import _flash_attention_forward
 
 
 logger = logging.get_logger(__name__)
@@ -139,9 +139,9 @@ class VisionCoreAttention(nn.Module):
     
 class VisionSelfAttention(nn.Module, AttachableStore):
     def __init__(self, config: Idefics3VisionConfig, parallel_config: Optional[ParallelismArgs],
-    tp_pg: dist.ProcessGroup):
+    tp_pg: dist.ProcessGroup, layer_idx: int):
         super().__init__()
-
+        self.layer_idx = layer_idx
         assert (
             config.num_attention_heads % tp_pg.size() == 0
         ), f"Number of attention heads ({config.num_attention_heads}) must be divisible by TP size ({tp_pg.size()})."
@@ -219,10 +219,15 @@ class VisionSelfAttention(nn.Module, AttachableStore):
             flash_attn_with_kvcache,
         )
 
+        hidden_states = hidden_states
+
         qkv_states = self.qkv_proj(
             hidden_states
-        )  # [seq_length, batch_size, n_local_q_heads * d_qk + 2 * n_local_kv_heads * d_qk]
-        q_length, batch_size, _ = qkv_states.shape
+        )  # [batch_size, seq_length, n_local_q_heads * d_qk + 2 * n_local_kv_heads * d_qk]
+        batch_size, q_length, _ = qkv_states.shape
+
+
+        torch.save(qkv_states, f"img_emb_nano_{self.layer_idx}_qkv.pt")
 
         if self.is_gqa:
             query_states, key_states, value_states = torch.split(
@@ -236,18 +241,18 @@ class VisionSelfAttention(nn.Module, AttachableStore):
             )
 
             query_states = (
-                query_states.transpose(0, 1).contiguous().view(batch_size, q_length, self.n_local_q_heads, self.d_qk)
+                query_states.contiguous().view(batch_size, q_length, self.n_local_q_heads, self.d_qk)
             )
             key_states = (
-                key_states.transpose(0, 1).contiguous().view(batch_size, q_length, self.n_local_kv_heads, self.d_qk)
+                key_states.contiguous().view(batch_size, q_length, self.n_local_kv_heads, self.d_qk)
             )
             value_states = (
-                value_states.transpose(0, 1).contiguous().view(batch_size, q_length, self.n_local_kv_heads, self.d_qk)
+                value_states.contiguous().view(batch_size, q_length, self.n_local_kv_heads, self.d_qk)
             )
         else:
             query_states, key_states, value_states = (
-                qkv_states.view(q_length, batch_size, 3, self.n_local_q_heads, self.d_qk)
-                .permute(2, 1, 0, 3, 4)
+                qkv_states.view(batch_size, q_length, 3, self.n_local_q_heads, self.d_qk)
+                .permute(2, 0, 1, 3, 4)
                 .contiguous()
             )  # [3, batch_size, seq_length, n_local_q_heads, d_qk]
 
@@ -267,16 +272,41 @@ class VisionSelfAttention(nn.Module, AttachableStore):
         key_states = key_states.view(batch_size, kv_length, self.n_local_kv_heads, self.d_qk)
         value_states = value_states.view(batch_size, kv_length, self.n_local_kv_heads, self.d_v)
 
-        attention_output = self.attention(
-            query_states=query_states,
-            key_states=key_states,
-            value_states=value_states,
-        )   
+        torch.save(query_states, f"img_emb_nano_{self.layer_idx}_query_states.pt")
+        torch.save(key_states, f"img_emb_nano_{self.layer_idx}_key_states.pt")
+        torch.save(value_states, f"img_emb_nano_{self.layer_idx}_value_states.pt")
 
-        attention_output = (
-            attention_output.contiguous().view(batch_size, q_length, self.n_local_q_heads * self.d_v).transpose(0, 1)
+        # attention_output = self.attention(
+        #     query_states=query_states,
+        #     key_states=key_states,
+        #     value_states=value_states,
+        # )   
+
+        # attention_output = (
+        #     attention_output.contiguous().view(batch_size, q_length, self.n_local_q_heads * self.d_v).transpose(0, 1)
+        # )
+
+        attn_output = _flash_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            None,
+            q_length,
+            dropout=0.0,
+            sliding_window=getattr(self, "sliding_window", None),
+            use_top_left_mask=False,
+            is_causal=False,
+            # **kwargs,
         )
-        output = self.o_proj(attention_output)
+
+
+        
+        attn_output = attn_output.contiguous().view(batch_size, q_length, self.d_model)
+
+
+        torch.save(attn_output, f"img_emb_nano_{self.layer_idx}_attn_output.pt")
+
+        output = self.o_proj(attn_output)
 
         return {"hidden_states": output, "sequence_mask": sequence_mask}
     
@@ -331,7 +361,8 @@ class VisionEncoderLayer(nn.Module):
         self,
         config: Idefics3VisionConfig,
         parallel_config: Optional[ParallelismArgs],
-        tp_pg: dist.ProcessGroup
+        tp_pg: dist.ProcessGroup,
+        layer_id: int,
     ):
         super().__init__()
 
@@ -339,6 +370,7 @@ class VisionEncoderLayer(nn.Module):
             config,
             parallel_config=parallel_config,
             tp_pg=tp_pg,
+            layer_idx=layer_id,
         )
 
         self.layer_norm1 = TritonLayerNorm(
@@ -359,6 +391,7 @@ class VisionEncoderLayer(nn.Module):
         )
 
         self.tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
+        self.layer_id = layer_id
 
 
     def forward(
@@ -367,16 +400,32 @@ class VisionEncoderLayer(nn.Module):
         sequence_mask: Union[torch.Tensor, TensorPointer],
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
         residual = hidden_states
+
+        torch.save(hidden_states, f"img_emb_nano_{self.layer_id}_before_ln1.pt")
+
         hidden_states = self.layer_norm1(hidden_states)
+
+        torch.save(hidden_states, f"img_emb_nano_{self.layer_id}_after_ln1.pt")
+
         output = self.self_attn(hidden_states=hidden_states, sequence_mask=sequence_mask)
 
         hidden_states = output["hidden_states"]
 
+        torch.save(hidden_states, f"img_emb_nano_{self.layer_id}_after_attn.pt")
+
         hidden_states = hidden_states + residual
+
+
+        torch.save(hidden_states, f"img_emb_nano_{self.layer_id}_before_ln2.pt")
 
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
+
+        torch.save(hidden_states, f"img_emb_nano_{self.layer_id}_after_ln2.pt")
+
         hidden_states = self.mlp(hidden_states=hidden_states)["hidden_states"]
+
+        torch.save(hidden_states, f"img_emb_nano_{self.layer_id}_after_mlp.pt")
 
         hidden_states = hidden_states + residual
 
@@ -425,6 +474,7 @@ class VisionTransformer(nn.Module):
                         "config": config.vision_config,
                         "parallel_config": parallel_config,
                         "tp_pg": parallel_context.tp_pg,
+                        "layer_id": i,
                     },
                     module_input_keys={
                         "hidden_states",
@@ -436,7 +486,7 @@ class VisionTransformer(nn.Module):
                     }
                 )
 
-                for _ in range(config.vision_config.num_hidden_layers)
+                for i in range(config.vision_config.num_hidden_layers)
             ]
         )
 
@@ -476,6 +526,9 @@ class VisionTransformer(nn.Module):
             patch_attention_mask=patch_attention_mask,
         )["embeddings"]
 
+
+        torch.save(hidden_states, "img_emb_nano.pt")
+
         patch_attention_mask = patch_attention_mask.view(batch_size, -1)
 
         hidden_encoder_states = {
@@ -483,8 +536,10 @@ class VisionTransformer(nn.Module):
             "sequence_mask": patch_attention_mask,
         }
 
-        for encoder_layer in self.encoder:
+        for i, encoder_layer in enumerate(self.encoder):
             hidden_encoder_states = encoder_layer(**hidden_encoder_states)
+
+            torch.save(hidden_encoder_states["hidden_states"], f"img_emb_nano_{i}.pt")
 
         hidden_states = hidden_encoder_states["hidden_states"]
         hidden_states = self.post_layernorm(input=hidden_states)
@@ -565,15 +620,10 @@ class Idefics3SimpleMLP(nn.Module):
 
         self.input_size = hidden_size * (config.scale_factor ** 2)
         self.output_size = config.llama_config.hidden_size
-
-        self.proj = TensorParallelColumnLinear(
+        self.proj = nn.Linear(
             self.input_size,
             self.output_size,
-            pg=tp_pg,
-            mode=tp_mode,
-            bias=False,
-            async_communication=tp_linear_async_communication,
-            tp_recompute_allgather=parallel_config.tp_recompute_allgather,
+            bias = False
         )
 
     def forward(self, hidden_states):
@@ -587,13 +637,24 @@ class Idefics3Connector(nn.Module):
         config: Idefics3Config,
         parallel_config: Optional[ParallelismArgs],
         tp_pg: dist.ProcessGroup,
+        p2p
     ):
         super().__init__()
         self.scale_factor = config.scale_factor
-        self.modality_projector = Idefics3SimpleMLP(
-            config=config,
-            parallel_config=parallel_config,
-            tp_pg=tp_pg,
+        self.modality_projector = PipelineBlock(
+            p2p=p2p,
+            module_builder=Idefics3SimpleMLP,
+            module_kwargs={
+                "config": config,
+                "parallel_config": parallel_config,
+                "tp_pg": tp_pg,
+            },
+            module_input_keys={
+                "hidden_states"
+            },
+            module_output_keys={
+                "hidden_states"
+            }
         )
 
     def pixel_shuffle(self, x, scale_factor=2):
@@ -610,7 +671,7 @@ class Idefics3Connector(nn.Module):
     
     def forward(self, hidden_states):
         hidden_states = self.pixel_shuffle(hidden_states, self.scale_factor)
-        hidden_states = self.modality_projector(hidden_states)["hidden_states"]
+        hidden_states = self.modality_projector(hidden_states=hidden_states)["hidden_states"]
         return {"hidden_states": hidden_states}
 
 class Idefics3Model(nn.Module):
@@ -638,20 +699,8 @@ class Idefics3Model(nn.Module):
             parallel_config=parallel_config,
         )
 
-        self.connector = PipelineBlock(
-            p2p=self.llama.p2p,
-            module_builder=Idefics3Connector,
-            module_kwargs={
-                "config": config,
-                "parallel_config": parallel_config,
-                "tp_pg": parallel_context.tp_pg,
-            },
-            module_input_keys={
-                "hidden_states"
-            },
-            module_output_keys={
-                "hidden_states"
-            }
+        self.connector = Idefics3Connector(
+            config, parallel_config, parallel_context.tp_pg, self.llama.p2p
         )
 
         self.image_seq_len = int(
@@ -664,6 +713,9 @@ class Idefics3Model(nn.Module):
             inputs_embeds: Union[torch.Tensor, TensorPointer],
             image_hidden_states: Union[torch.Tensor, TensorPointer],
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
+        print(
+            inputs_embeds.shape, image_hidden_states.shape
+        )
         num_images, _, vision_hidden_size = image_hidden_states.shape
         special_image_token_mask = input_ids == self.image_token_id
         new_inputs_embeds = inputs_embeds.clone()
@@ -704,11 +756,15 @@ class Idefics3Model(nn.Module):
         patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
         patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) == patch_size * patch_size).bool()
 
+        torch.save(pixel_values, "pv_nano.pt")
+
         # Get sequence from the vision encoder
         image_hidden_states = self.vision_model(
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
         )["hidden_states"]
+
+        torch.save(image_hidden_states, "img_hid_nano.pt")
 
         # Modality projection & resampling
         image_hidden_states = self.connector(
@@ -716,6 +772,8 @@ class Idefics3Model(nn.Module):
         )
 
         inputs_embeds = self.llama.token_position_embeddings(input_ids=input_ids, input_mask=input_mask)
+
+        torch.save(inputs_embeds["input_embeds"], "input_embeds_nano.pt")
 
         inputs_embeds = self.inputs_merger(
             input_ids=input_ids,

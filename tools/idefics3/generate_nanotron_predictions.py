@@ -145,6 +145,11 @@ def main(args):
     with torch.no_grad():
         output = model.model(**inputs)
 
+    torch.save(
+        output,
+        "nanotron_output.pt",
+    )
+
     if not RANK:
         predicted_tokens = [5, 27, 34]  # Index of the predictions to compare across models
         term_cols = int(os.get_terminal_size().columns / 3)
