@@ -1,16 +1,21 @@
 import torch
+layer = 31
 hf = torch.load(
-    f"img_emb_hf_{26}_after_mlp.pt",
-).detach().cpu()
+    f"hf_output_text_llama.pt",
+).last_hidden_state.detach().cpu()
 nano = torch.load(
-    f"img_emb_nano_{26}_after_mlp.pt",
-).detach().cpu()
+    f"nano_output_text_llama.pt",
+).detach().cpu().transpose(0, 1)
 
 
 def compare_outputs(hf, nano):
     print(
         hf.shape, nano.shape
     )
+
+    if hf.shape != nano.shape:
+        print("Shapes are different")
+        return
     
     print(
         f"Max difference between outputs: {torch.max(torch.abs(hf - nano))}"

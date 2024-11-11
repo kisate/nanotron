@@ -102,10 +102,6 @@ def forward_attn(
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        combined = torch.cat([key_states, value_states, query_states], dim=-1)
-
-        torch.save(combined, f"img_emb_hf_{layer_idx}_qkv.pt")
-
         # Flash attention requires the input to have the shape
         # batch_size x seq_length x head_dim x hidden_dim
         # therefore we just need to keep the original shape
@@ -150,12 +146,6 @@ def forward_attn(
             key_states = key_states.to(target_dtype)
             value_states = value_states.to(target_dtype)
 
-        torch.save(query_states, f"img_emb_hf_{layer_idx}_query_states.pt")
-        torch.save(key_states, f"img_emb_hf_{layer_idx}_key_states.pt")
-        torch.save(value_states, f"img_emb_hf_{layer_idx}_value_states.pt")
-        torch.save(attention_mask, f"img_emb_hf_{layer_idx}_attention_mask.pt")
-        torch.save((q_len, dropout_rate, self.is_causal, self._flash_attn_uses_top_left_mask), f"img_emb_hf_{layer_idx}_args.pt")
-
         attn_output = _flash_attention_forward(
             query_states,
             key_states,
@@ -167,11 +157,7 @@ def forward_attn(
             use_top_left_mask=self._flash_attn_uses_top_left_mask,
         )
 
-        attn_output = attn_output.reshape(bsz, q_len, self.embed_dim).contiguous()
-        
-        
-        torch.save(attn_output, f"img_emb_hf_{layer_idx}_attn_output.pt")
-        
+        attn_output = attn_output.reshape(bsz, q_len, self.embed_dim).contiguous()        
         attn_output = self.out_proj(attn_output)
 
         if not output_attentions:
@@ -198,13 +184,8 @@ def forward_encoder_layer(
                 returned tensors for more detail.
         """
         residual = hidden_states
-
-        torch.save(hidden_states, f"img_emb_hf_{layer_idx}_before_ln1.pt")
-
         hidden_states = self.layer_norm1(hidden_states)
-
-        torch.save(hidden_states, f"img_emb_hf_{layer_idx}_after_ln1.pt")
-
+        
         hidden_states, attn_weights = forward_attn(
             self.self_attn,
             hidden_states=hidden_states,
@@ -213,20 +194,13 @@ def forward_encoder_layer(
             layer_idx=layer_idx,
         )
 
-        torch.save(hidden_states, f"img_emb_hf_{layer_idx}_after_attn.pt")
-
         hidden_states = residual + hidden_states
 
-        torch.save(hidden_states, f"img_emb_hf_{layer_idx}_before_ln2.pt")
-
+        
         residual = hidden_states
+
         hidden_states = self.layer_norm2(hidden_states)
-
-        torch.save(hidden_states, f"img_emb_hf_{layer_idx}_after_ln2.pt")
-
         hidden_states = self.mlp(hidden_states)
-
-        torch.save(hidden_states, f"img_emb_hf_{layer_idx}_after_mlp.pt")
 
         hidden_states = residual + hidden_states
 
@@ -299,8 +273,6 @@ def forward_encoder(
 
         hidden_states = layer_outputs[0]
 
-        torch.save(hidden_states, f"img_emb_hf_{i}.pt")
-
         if output_attentions:
             all_attentions = all_attentions + (layer_outputs[1],)
 
@@ -340,8 +312,6 @@ def forward_vision(
 
         hidden_states = forward_embedding(self.embeddings, pixel_values=pixel_values, patch_attention_mask=patch_attention_mask)
         
-        torch.save(hidden_states, "img_emb_hf.pt")
-
         patch_attention_mask = patch_attention_mask.view(batch_size, -1)
         # The call to `_upad_input` in `_flash_attention_forward` is expensive
         # So when the `patch_attention_mask` is full of 1s (i.e. attending to the whole sequence),
@@ -367,6 +337,125 @@ def forward_vision(
             return (last_hidden_state,) + encoder_outputs[1:]
 
         return last_hidden_state
+
+def forward_text_model(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values  = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        **flash_attn_kwargs,
+    ):
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if (input_ids is None) ^ (inputs_embeds is not None):
+            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+
+        if self.gradient_checkpointing and self.training and use_cache:
+            # logger.warning_once(
+            #     "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
+            # )
+            use_cache = False
+
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+
+        # kept for BC (non `Cache` `past_key_values` inputs)
+        return_legacy_cache = False
+        if use_cache and not isinstance(past_key_values, Cache):
+            return_legacy_cache = True
+            if past_key_values is None:
+                past_key_values = DynamicCache()
+            else:
+                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
+                # logger.warning_once(
+                #     "We detected that you are passing `past_key_values` as a tuple of tuples. This is deprecated and "
+                #     "will be removed in v4.47. Please convert your cache or use an appropriate `Cache` class "
+                #     "(https://huggingface.co/docs/transformers/kv_cache#legacy-cache-format)"
+                # )
+
+        if cache_position is None:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
+
+        causal_mask = self._update_causal_mask(
+            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+        )
+        hidden_states = inputs_embeds
+
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+
+        # decoder layers
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+        next_decoder_cache = None
+
+        for i, decoder_layer in enumerate(self.layers):
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+
+            if self.gradient_checkpointing and self.training:
+                layer_outputs = self._gradient_checkpointing_func(
+                    decoder_layer.__call__,
+                    hidden_states,
+                    causal_mask,
+                    position_ids,
+                    past_key_values,
+                    output_attentions,
+                    use_cache,
+                    cache_position,
+                    position_embeddings,
+                )
+            else:
+                layer_outputs = decoder_layer(
+                    hidden_states,
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    past_key_value=past_key_values,
+                    output_attentions=output_attentions,
+                    use_cache=use_cache,
+                    cache_position=cache_position,
+                    position_embeddings=position_embeddings,
+                    **flash_attn_kwargs,
+                )
+
+            hidden_states = layer_outputs[0]
+
+            if use_cache:
+                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
+
+        hidden_states = self.norm(hidden_states)
+
+        # add hidden states from the last decoder layer
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+
+        next_cache = next_decoder_cache if use_cache else None
+        if return_legacy_cache:
+            next_cache = next_cache.to_legacy_cache()
+
+        if not return_dict:
+            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+        return hidden_states, next_cache, all_hidden_states, all_self_attns
 
 
 def forward(
@@ -411,9 +500,6 @@ def forward(
         if inputs_embeds is None:
             inputs_embeds = self.text_model.get_input_embeddings()(input_ids).to(self.device)
 
-
-            torch.save(inputs_embeds, "inputs_embeds_hf.pt")
-
         # START VISUAL INPUTS INTEGRATION
         if pixel_values is not None and image_hidden_states is not None:
             raise ValueError("You cannot specify both pixel_values and image_hidden_states at the same time")
@@ -446,8 +532,6 @@ def forward(
             patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
             patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
 
-            torch.save(pixel_values, "pv_hf.pt")
-
             # Get sequence from the vision encoder
             image_hidden_states = forward_vision(
                 self.vision_model,
@@ -455,8 +539,6 @@ def forward(
                 patch_attention_mask=patch_attention_mask,
             )
 
-
-            torch.save(image_hidden_states, "img_hid_hf.pt")
 
             # Modality projection & resampling  
             image_hidden_states = self.connector(image_hidden_states)
@@ -474,7 +556,8 @@ def forward(
                 image_hidden_states=image_hidden_states,
             )
 
-        outputs = self.text_model(
+        outputs = forward_text_model(
+            self.text_model,
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -509,10 +592,6 @@ def main(args):
     text = processor.apply_chat_template(messages, add_generation_prompt=True)
     inputs = processor(images=images, text=text, return_tensors="pt").to(DEVICE)
 
-    print(
-        model.model.config
-    )
-
     with torch.no_grad():
         # output = model(**inputs)
 
@@ -521,14 +600,6 @@ def main(args):
             use_cache=False,
             **inputs
         )
-
-    print(output)
-    print(output.last_hidden_state.shape)
-
-    torch.save(
-        output,
-        "hf_output.pt",
-    )
 
 
 if __name__ == "__main__":

@@ -227,8 +227,6 @@ class VisionSelfAttention(nn.Module, AttachableStore):
         batch_size, q_length, _ = qkv_states.shape
 
 
-        torch.save(qkv_states, f"img_emb_nano_{self.layer_idx}_qkv.pt")
-
         if self.is_gqa:
             query_states, key_states, value_states = torch.split(
                 qkv_states,
@@ -272,41 +270,17 @@ class VisionSelfAttention(nn.Module, AttachableStore):
         key_states = key_states.view(batch_size, kv_length, self.n_local_kv_heads, self.d_qk)
         value_states = value_states.view(batch_size, kv_length, self.n_local_kv_heads, self.d_v)
 
-        torch.save(query_states, f"img_emb_nano_{self.layer_idx}_query_states.pt")
-        torch.save(key_states, f"img_emb_nano_{self.layer_idx}_key_states.pt")
-        torch.save(value_states, f"img_emb_nano_{self.layer_idx}_value_states.pt")
+        attention_output = self.attention(
+            query_states=query_states,
+            key_states=key_states,
+            value_states=value_states,
+        )   
 
-        # attention_output = self.attention(
-        #     query_states=query_states,
-        #     key_states=key_states,
-        #     value_states=value_states,
-        # )   
-
-        # attention_output = (
-        #     attention_output.contiguous().view(batch_size, q_length, self.n_local_q_heads * self.d_v).transpose(0, 1)
-        # )
-
-        attn_output = _flash_attention_forward(
-            query_states,
-            key_states,
-            value_states,
-            None,
-            q_length,
-            dropout=0.0,
-            sliding_window=getattr(self, "sliding_window", None),
-            use_top_left_mask=False,
-            is_causal=False,
-            # **kwargs,
+        attention_output = (
+            attention_output.contiguous().view(batch_size, q_length, self.n_local_q_heads * self.d_v)
         )
 
-
-        
-        attn_output = attn_output.contiguous().view(batch_size, q_length, self.d_model)
-
-
-        torch.save(attn_output, f"img_emb_nano_{self.layer_idx}_attn_output.pt")
-
-        output = self.o_proj(attn_output)
+        output = self.o_proj(attention_output)
 
         return {"hidden_states": output, "sequence_mask": sequence_mask}
     
@@ -399,34 +373,19 @@ class VisionEncoderLayer(nn.Module):
         hidden_states: Union[torch.Tensor, TensorPointer],
         sequence_mask: Union[torch.Tensor, TensorPointer],
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
+        
         residual = hidden_states
 
-        torch.save(hidden_states, f"img_emb_nano_{self.layer_id}_before_ln1.pt")
-
         hidden_states = self.layer_norm1(hidden_states)
-
-        torch.save(hidden_states, f"img_emb_nano_{self.layer_id}_after_ln1.pt")
-
         output = self.self_attn(hidden_states=hidden_states, sequence_mask=sequence_mask)
-
         hidden_states = output["hidden_states"]
-
-        torch.save(hidden_states, f"img_emb_nano_{self.layer_id}_after_attn.pt")
 
         hidden_states = hidden_states + residual
 
-
-        torch.save(hidden_states, f"img_emb_nano_{self.layer_id}_before_ln2.pt")
-
         residual = hidden_states
+
         hidden_states = self.layer_norm2(hidden_states)
-
-        torch.save(hidden_states, f"img_emb_nano_{self.layer_id}_after_ln2.pt")
-
         hidden_states = self.mlp(hidden_states=hidden_states)["hidden_states"]
-
-        torch.save(hidden_states, f"img_emb_nano_{self.layer_id}_after_mlp.pt")
-
         hidden_states = hidden_states + residual
 
         return {
@@ -526,9 +485,6 @@ class VisionTransformer(nn.Module):
             patch_attention_mask=patch_attention_mask,
         )["embeddings"]
 
-
-        torch.save(hidden_states, "img_emb_nano.pt")
-
         patch_attention_mask = patch_attention_mask.view(batch_size, -1)
 
         hidden_encoder_states = {
@@ -539,11 +495,9 @@ class VisionTransformer(nn.Module):
         for i, encoder_layer in enumerate(self.encoder):
             hidden_encoder_states = encoder_layer(**hidden_encoder_states)
 
-            torch.save(hidden_encoder_states["hidden_states"], f"img_emb_nano_{i}.pt")
-
         hidden_states = hidden_encoder_states["hidden_states"]
         hidden_states = self.post_layernorm(input=hidden_states)
-        
+
         return hidden_states
     
     def get_block_compute_costs(self):
@@ -713,9 +667,7 @@ class Idefics3Model(nn.Module):
             inputs_embeds: Union[torch.Tensor, TensorPointer],
             image_hidden_states: Union[torch.Tensor, TensorPointer],
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
-        print(
-            inputs_embeds.shape, image_hidden_states.shape
-        )
+
         num_images, _, vision_hidden_size = image_hidden_states.shape
         special_image_token_mask = input_ids == self.image_token_id
         new_inputs_embeds = inputs_embeds.clone()
@@ -756,15 +708,11 @@ class Idefics3Model(nn.Module):
         patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
         patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) == patch_size * patch_size).bool()
 
-        torch.save(pixel_values, "pv_nano.pt")
-
         # Get sequence from the vision encoder
         image_hidden_states = self.vision_model(
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
         )["hidden_states"]
-
-        torch.save(image_hidden_states, "img_hid_nano.pt")
 
         # Modality projection & resampling
         image_hidden_states = self.connector(
@@ -772,8 +720,6 @@ class Idefics3Model(nn.Module):
         )
 
         inputs_embeds = self.llama.token_position_embeddings(input_ids=input_ids, input_mask=input_mask)
-
-        torch.save(inputs_embeds["input_embeds"], "input_embeds_nano.pt")
 
         inputs_embeds = self.inputs_merger(
             input_ids=input_ids,
@@ -783,8 +729,8 @@ class Idefics3Model(nn.Module):
 
         outputs = self.llama.forward_with_hidden_states(
             input_ids=None,
-            input_embeds=inputs_embeds,
-            input_mask=input_mask,
+            input_embeds=inputs_embeds.transpose(0, 1),
+            input_mask=input_mask.transpose(0, 1),
         )
 
         return outputs

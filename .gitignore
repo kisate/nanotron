@@ -165,3 +165,4 @@ checkpoints/
 wandb/
 
 nanotron-ckpt/*
+nanotron_checkpoints/*
