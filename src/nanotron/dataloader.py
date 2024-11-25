@@ -357,21 +357,21 @@ def vqa_process(
             messages.append(assistant_message)
         return messages
 
-    def _process_examples(examples: Dict) -> Dict[str, List[np.ndarray]]:
+    def _process_examples(examples: Dict, images) -> Dict[str, List[np.ndarray]]:
         inputs = [
             processor(
                 text=processor.apply_chat_template(format_example(ex), add_generation_prompt=True),
-                images = [ex["image"]],
+                images = [img],
                 return_tensors="np", max_length=sequence_length + 1, padding="longest", truncation=True
             ) 
-            for ex in examples
+            for ex, img in zip(examples, images)
         ]
         
         return inputs
 
     train_dataset = raw_dataset.map(
         _process_examples,
-        input_columns="qa",
+        input_columns=["qa", "image"],
         remove_columns=raw_dataset.column_names,
         batched=True,
         num_proc=dataset_processing_num_proc_per_process,

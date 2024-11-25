@@ -2,7 +2,7 @@ checkpoints:
   checkpoint_interval: 10
   checkpoints_path: checkpoints
   checkpoints_path_is_shared_file_system: false
-  resume_checkpoint_path: nanotron-ckpt-train
+  resume_checkpoint_path: null
   save_initial_state: false
 data_stages:
 - data:
