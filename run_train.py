@@ -19,6 +19,7 @@ from nanotron.dataloader import (
     dummy_infinite_data_generator,
     get_datasets,
     get_train_dataloader,
+    vqa_process,
 )
 from nanotron.helpers import (
     compute_remain_train_steps_of_a_data_stage_from_ckp,
@@ -32,7 +33,7 @@ from torch.utils.data import DataLoader
 
 try:
     from huggingface_hub import __version__ as hf_hub_version
-    from transformers import AutoTokenizer
+    from transformers import AutoTokenizer, AutoProcessor
     from transformers import __version__ as tf_version
 except ImportError:
     hf_hub_version = None
@@ -46,6 +47,7 @@ def get_dataloader_from_data_stage(
     data: DataArgs,
     consumed_train_samples: int,
     num_remaining_train_steps: int,
+    vqa=False
 ):
     """
     Returns a dataloader for a given data stage.
@@ -96,24 +98,36 @@ def get_dataloader_from_data_stage(
                 splits=data.dataset.hf_dataset_splits,
             )["train"]
 
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-            tokenizer.pad_token = tokenizer.eos_token
-            tokenizer.padding_side = "left"
 
-            # Check that tokenizer's vocab size is smaller than the model's vocab size
-            assert (
-                tokenizer.vocab_size <= trainer.model_config.vocab_size
-            ), f"Tokenizer's vocab size ({tokenizer.vocab_size}) is larger than the model's vocab size ({trainer.model_config.vocab_size})"
+            if vqa:
+                processor = AutoProcessor.from_pretrained(tokenizer_path)
+                train_dataset = vqa_process(
+                    raw_dataset=raw_dataset,
+                    processor=processor,
+                    dataset_processing_num_proc_per_process=data.dataset.dataset_processing_num_proc_per_process,
+                    dataset_overwrite_cache=data.dataset.dataset_overwrite_cache,
+                    sequence_length=trainer.sequence_length,
+                )
 
-            # We apply the Causal Language Modeling preprocessing
-            train_dataset = clm_process(
-                raw_dataset=raw_dataset,
-                tokenizer=tokenizer,
-                text_column_name=data.dataset.text_column_name,
-                dataset_processing_num_proc_per_process=data.dataset.dataset_processing_num_proc_per_process,
-                dataset_overwrite_cache=data.dataset.dataset_overwrite_cache,
-                sequence_length=trainer.sequence_length,
-            )
+            else:
+                tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+                tokenizer.pad_token = tokenizer.eos_token
+                tokenizer.padding_side = "left"
+
+                # Check that tokenizer's vocab size is smaller than the model's vocab size
+                assert (
+                    tokenizer.vocab_size <= trainer.model_config.vocab_size
+                ), f"Tokenizer's vocab size ({tokenizer.vocab_size}) is larger than the model's vocab size ({trainer.model_config.vocab_size})"
+
+                # We apply the Causal Language Modeling preprocessing
+                train_dataset = clm_process(
+                    raw_dataset=raw_dataset,
+                    tokenizer=tokenizer,
+                    text_column_name=data.dataset.text_column_name,
+                    dataset_processing_num_proc_per_process=data.dataset.dataset_processing_num_proc_per_process,
+                    dataset_overwrite_cache=data.dataset.dataset_overwrite_cache,
+                    sequence_length=trainer.sequence_length,
+                )
 
             # We load the processed dataset on the ranks requiring it
             dataloader = get_train_dataloader(
@@ -127,6 +141,7 @@ def get_dataloader_from_data_stage(
                 dataloader_num_workers=data.num_loading_workers,
                 seed_worker=data.seed,
                 dataloader_drop_last=True,
+                dataset_columns=["input_ids", "pixel_values"]
             )
 
             # Check if we have enough samples for train_steps

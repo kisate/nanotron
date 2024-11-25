@@ -595,11 +595,34 @@ def main(args):
     with torch.no_grad():
         # output = model(**inputs)
 
-        output = forward(
-            model.model,
+        output = model.model(
             use_cache=False,
             **inputs
         )
+
+    logits = model.lm_head(output.last_hidden_state)
+
+    predicted_tokens = [5, 27, 34]  # Index of the predictions to compare across models
+    term_cols = int(os.get_terminal_size().columns / 3)
+
+    for predicted_token in predicted_tokens:
+
+        print("\n", "=" * term_cols, f"Predictions of token {predicted_token}", "=" * term_cols)
+        next_tokens = torch.softmax(logits[0, predicted_token, :], -1)
+        topk_next_tokens = torch.topk(next_tokens, 10)
+
+        print(
+            *[
+                f"[HF Model] Next token: {idx.item()}, probability: {prob}"
+                for idx, prob in zip(topk_next_tokens.indices, topk_next_tokens.values)
+            ],
+            sep="\n",
+        )
+
+    # Compute accuracy
+    # predictions = np.argmax(output.logits.cpu(), axis=2).flatten().tolist()
+    # labels = tokens.cpu().flatten()[1:].tolist()
+    # print(f"\nAccuracy: {accuracy_score(labels, predictions)}")
 
 
 if __name__ == "__main__":

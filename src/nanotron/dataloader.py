@@ -29,7 +29,7 @@ try:
         concatenate_datasets,
         load_dataset,
     )
-    from transformers import PreTrainedTokenizerBase
+    from transformers import PreTrainedTokenizerBase, Idefics3Processor
     from transformers.trainer_pt_utils import DistributedSamplerWithLoop
 except ImportError:
     warnings.warn("Datasets and/or Transformers not installed, you'll be unable to use the dataloader.")
@@ -119,6 +119,7 @@ def get_datasets(
                 hf_dataset_or_datasets,
                 hf_dataset_config_name,
                 split=split,
+                trust_remote_code=True
             )
     else:
         raise ValueError(f"hf_dataset_or_datasets must be a dict or string but is {type(hf_dataset_or_datasets)}")
@@ -323,6 +324,63 @@ def clm_process(
     )
     return train_dataset
 
+def vqa_process(
+    raw_dataset: "Dataset",
+    processor: "Idefics3Processor",
+    dataset_processing_num_proc_per_process: int,
+    dataset_overwrite_cache: bool,
+    sequence_length: int,
+):
+    def format_example(example):
+        messages = []
+        for i, x in enumerate(example["en"]):
+            user_message = {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": x["question"]},
+                ]
+            }
+
+            if i == 0:
+                user_message["content"].append(
+                    {"type": "image"},
+                )
+
+            messages.append(user_message)
+            assistant_message = {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": x["answer"]},
+                ]
+            }
+
+            messages.append(assistant_message)
+        return messages
+
+    def _process_examples(examples: Dict) -> Dict[str, List[np.ndarray]]:
+        inputs = [
+            processor(
+                text=processor.apply_chat_template(format_example(ex), add_generation_prompt=True),
+                images = [ex["image"]],
+                return_tensors="np", max_length=sequence_length + 1, padding="longest", truncation=True
+            ) 
+            for ex in examples
+        ]
+        
+        return inputs
+
+    train_dataset = raw_dataset.map(
+        _process_examples,
+        input_columns="qa",
+        remove_columns=raw_dataset.column_names,
+        batched=True,
+        num_proc=dataset_processing_num_proc_per_process,
+        load_from_cache_file=not dataset_overwrite_cache,
+    )
+
+    return train_dataset
+        
+
 
 # Adapted from: https://github.com/huggingface/transformers/blob/47e1676255e5dd86b9541f734cd4f4bdcbb50f4a/src/transformers/data/data_collator.py#L607
 @dataclasses.dataclass
@@ -398,6 +456,57 @@ class DataCollatorForCLM:
         result = {k: v if isinstance(v, TensorPointer) else torch.from_numpy(v) for k, v in result.items()}
         return result
 
+class DataCollatorForVQA:
+    sequence_length: int
+    input_pp_rank: int
+    output_pp_rank: int
+    parallel_context: ParallelContext
+
+    def __call__(self, examples: List[Dict[str, List[np.ndarray]]]) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
+        # Process the case when current rank doesn't require data. We return `TensorPointer` that points to ranks having the data.
+        current_pp_rank = dist.get_rank(self.parallel_context.pp_pg)
+        if current_pp_rank not in [
+            self.input_pp_rank,
+            self.output_pp_rank,
+        ]:
+            assert all(len(example) == 0 for example in examples)
+            return {
+                "input_ids": TensorPointer(group_rank=self.input_pp_rank),
+                "input_mask": TensorPointer(group_rank=self.input_pp_rank),
+                "label_ids": TensorPointer(group_rank=self.output_pp_rank),
+                "label_mask": TensorPointer(group_rank=self.output_pp_rank),
+                "pixel_values": TensorPointer(group_rank=self.input_pp_rank),
+            }
+
+        # Make sure we load only what's necessary, ie we only load a `input_ids` column.
+        assert all(list(example.keys()) == ["input_ids", "pixel_values"] for example in examples)
+
+        # TODO @nouamanetazi: Is it better to have examples as np.array or torch.Tensor?
+        input_ids = np.vstack([examples[i]["input_ids"] for i in range(len(examples))])
+        pixel_values = np.vstack([examples[i]["pixel_values"] for i in range(len(examples))])
+
+        batch_size, expanded_input_length = input_ids.shape
+
+        result: Dict[str, Union[np.ndarray, TensorPointer]] = {}
+
+        result["input_ids"] = TensorPointer(group_rank=self.input_pp_rank)
+        result["input_mask"] = TensorPointer(group_rank=self.input_pp_rank)
+        result["label_ids"] = TensorPointer(group_rank=self.output_pp_rank)
+        result["label_mask"] = TensorPointer(group_rank=self.output_pp_rank)
+        result["pixel_values"] = TensorPointer(group_rank=self.input_pp_rank)
+
+        if current_pp_rank == self.input_pp_rank:
+            result["input_ids"] = input_ids[:, :-1]
+            result["input_mask"] = np.ones((batch_size, self.sequence_length), dtype=np.bool_)
+            result["pixel_values"] = pixel_values
+        
+        if current_pp_rank == self.output_pp_rank:
+            result["label_ids"] = input_ids[:, 1:]
+            result["label_mask"] = np.ones((batch_size, self.sequence_length), dtype=np.bool_)
+            result["pixel_values"] = pixel_values
+
+        result = {k: v if isinstance(v, TensorPointer) else torch.from_numpy(v) for k, v in result.items()}
+        return result
 
 # Adapted from https://github.com/huggingface/transformers/blob/47e1676255e5dd86b9541f734cd4f4bdcbb50f4a/src/transformers/trainer.py#L763-L835
 def get_sampler(
@@ -452,6 +561,7 @@ def get_train_dataloader(
     dataloader_drop_last: bool = True,
     dataloader_pin_memory: bool = True,
     use_loop_to_round_batch_size: bool = False,
+    dataset_columns = ["input_ids"]
 ) -> DataLoader:
     if not isinstance(train_dataset, datasets.Dataset):
         raise ValueError(f"training requires a datasets.Dataset, but got {type(train_dataset)}")
@@ -461,17 +571,17 @@ def get_train_dataloader(
         input_pp_rank,
         output_pp_rank,
     ]:
-        train_dataset = train_dataset.with_format(type="numpy", columns=["input_ids"], output_all_columns=True)
+        train_dataset = train_dataset.with_format(type="numpy", columns=dataset_columns, output_all_columns=True)
 
     # Case of ranks not requiring data. We give them an infinite dummy dataloader
     else:
         #
-        assert train_dataset.column_names == ["input_ids"], (
-            f"Dataset has to have a single column, with `input_ids` as the column name. "
+        assert train_dataset.column_names == dataset_columns, (
+            f"Dataset should only have {dataset_columns} columns"
             f"Current dataset: {train_dataset}"
         )
         dataset_length = len(train_dataset)
-        train_dataset = train_dataset.remove_columns(column_names="input_ids")
+        train_dataset = train_dataset.remove_columns(column_names=dataset_columns)
         assert (
             len(train_dataset) == 0
         ), f"Dataset has to be empty after removing the `input_ids` column. Current dataset: {train_dataset}"
@@ -480,12 +590,20 @@ def get_train_dataloader(
         # No need to spawn a lot of workers, we can just use main
         dataloader_num_workers = 0
 
-    data_collator = DataCollatorForCLM(
-        sequence_length=sequence_length,
-        input_pp_rank=input_pp_rank,
-        output_pp_rank=output_pp_rank,
-        parallel_context=parallel_context,
-    )
+    if "pixel_values" in dataset_columns:
+        data_collator = DataCollatorForVQA(
+            sequence_length=sequence_length,
+            input_pp_rank=input_pp_rank,
+            output_pp_rank=output_pp_rank,
+            parallel_context=parallel_context,
+        )
+    else:
+        data_collator = DataCollatorForCLM(
+            sequence_length=sequence_length,
+            input_pp_rank=input_pp_rank,
+            output_pp_rank=output_pp_rank,
+            parallel_context=parallel_context,
+        )
 
     # Compute size and rank of dataloader workers
     dp_ranks_size = parallel_context.dp_pg.size()

@@ -639,6 +639,10 @@ class Idefics3Model(nn.Module):
 
         self.config = config
         self.image_token_id = config.image_token_id
+        self.tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
+        tp_linear_async_communication = (
+            parallel_config.tp_linear_async_communication if parallel_config is not None else False
+        )
 
         self.llama = LlamaModel(
             config=config.llama_config,
@@ -659,6 +663,32 @@ class Idefics3Model(nn.Module):
 
         self.image_seq_len = int(
             ((config.vision_config.image_size // config.vision_config.patch_size) ** 2) / (config.scale_factor**2)
+        )
+
+        self.lm_head = PipelineBlock(
+            p2p=self.llama.p2p,
+            # Understand that this means that we return sharded logits that are going to need to be gathered
+            module_builder=TensorParallelColumnLinear,
+            module_kwargs={
+                "in_features": config.llama_config.hidden_size,
+                "out_features": config.llama_config.vocab_size,
+                "pg": parallel_context.tp_pg,
+                "bias": False,
+                # TODO @thomasw21: refactor so that we store that default in a single place.
+                "mode": self.tp_mode,
+                "async_communication": tp_linear_async_communication,
+                "tp_recompute_allgather": parallel_config.tp_recompute_allgather,
+            },
+            module_input_keys={"x"},
+            module_output_keys={"logits"},
+        )
+
+        self.cast_to_fp32 = PipelineBlock(
+            p2p=self.llama.p2p,
+            module_builder=lambda: lambda x: x.float(),
+            module_kwargs={},
+            module_input_keys={"x"},
+            module_output_keys={"output"},
         )
         
     def inputs_merger(
@@ -733,7 +763,13 @@ class Idefics3Model(nn.Module):
             input_mask=input_mask.transpose(0, 1),
         )
 
-        return outputs
+        hidden_states = outputs[1]
+
+        sharded_logits = self.lm_head(x=hidden_states)["logits"]
+
+        fp32_sharded_logits = self.cast_to_fp32(x=sharded_logits)["output"]
+
+        return fp32_sharded_logits, hidden_states
     
     def get_block_compute_costs(self):
         llama_cost = self.llama.get_block_compute_costs()

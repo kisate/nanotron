@@ -143,12 +143,7 @@ def main(args):
     model.eval()
 
     with torch.no_grad():
-        output = model.model(**inputs)
-
-    torch.save(
-        output,
-        "nanotron_output.pt",
-    )
+        output = model.model(**inputs)[0]
 
     if not RANK:
         predicted_tokens = [5, 27, 34]  # Index of the predictions to compare across models
@@ -158,7 +153,19 @@ def main(args):
 
             print("\n", "=" * term_cols, f"Predictions of token {predicted_token}", "=" * term_cols)
             next_tokens = torch.softmax(output.transpose(0, 1)[0, predicted_token, :], -1)
+            
+            print(
+                next_tokens.shape,
+            )
+
+            print(
+                f"128256 probability: {next_tokens[128256].item()}"
+            )
+
+            
             topk_next_tokens = torch.topk(next_tokens, 10)
+
+
 
             print(
                 *[
@@ -169,9 +176,9 @@ def main(args):
             )
 
         # Compute accuracy
-        predictions = np.argmax(output.transpose(0, 1).cpu(), axis=2).flatten().tolist()
-        labels = tokens.cpu().flatten()[1:].tolist()
-        print(f"\nAccuracy: {accuracy_score(labels, predictions)}")
+        # predictions = np.argmax(output.transpose(0, 1).cpu(), axis=2).flatten().tolist()
+        # labels = tokens.cpu().flatten()[1:].tolist()
+        # print(f"\nAccuracy: {accuracy_score(labels, predictions)}")
         # Results
         ## Nanotron 8B, TP 1: 0.8272058823529411
         ## Nanotron 8B, TP 2: 0.7720588235294118
