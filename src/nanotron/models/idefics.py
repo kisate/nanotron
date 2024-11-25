@@ -784,6 +784,7 @@ class Idefics3ForTraining(NanotronModel):
         config: Idefics3Config,
         parallel_context: ParallelContext,
         parallel_config: Optional[ParallelismArgs],
+        random_states: Optional[RandomStates] = None,
     ):
         super().__init__()
 

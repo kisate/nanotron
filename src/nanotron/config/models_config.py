@@ -166,6 +166,7 @@ class Idefics3Config:
     image_token_id: int = 128257
     pad_token_id: int = 128_002
     scale_factor: int = 2
+    vocab_size: int = 128260
 
 
 NanotronConfigs = Union[LlamaConfig, Starcoder2Config, Idefics3Config, Idefics3VisionConfig]

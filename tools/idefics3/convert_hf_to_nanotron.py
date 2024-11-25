@@ -436,6 +436,7 @@ def main(args):
         image_token_id=hf_config.image_token_id,
         pad_token_id=hf_config.vision_config.pad_token_id,
         scale_factor=hf_config.scale_factor,
+        vocab_size=nanotron_llama_config.vocab_size
     )
     # Init Idefics3 Nanotron model
     log_rank("Init empty Nanotron Idefics3 Model", logger=logger, level=logging.INFO, rank=0)
