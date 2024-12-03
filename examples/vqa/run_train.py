@@ -35,13 +35,13 @@ from nanotron.parallel.pipeline_parallel.utils import get_input_output_pp_ranks
 from nanotron.trainer import DistributedTrainer
 from nanotron.utils import main_rank_first
 from torch.utils.data import DataLoader
-from transformers import AutoProcessor
 
 
 
 try:
     from huggingface_hub import __version__ as hf_hub_version
     from transformers import AutoTokenizer
+    from transformers import AutoProcessor
     from transformers import __version__ as tf_version
 except ImportError:
     hf_hub_version = None
