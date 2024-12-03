@@ -738,6 +738,8 @@ class Idefics3Model(nn.Module):
         patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
         patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) == patch_size * patch_size).bool()
 
+        pixel_values = pixel_values.bfloat16()
+
         # Get sequence from the vision encoder
         image_hidden_states = self.vision_model(
             pixel_values=pixel_values,
@@ -825,9 +827,9 @@ class Idefics3ForTraining(NanotronModel):
         input_ids: Union[torch.Tensor, TensorPointer],
         input_mask: Union[torch.Tensor, TensorPointer],
         pixel_values: Union[torch.Tensor, TensorPointer],
-        pixel_attention_mask: Union[torch.Tensor, TensorPointer],
         label_ids: Union[torch.Tensor, TensorPointer],
         label_mask: Union[torch.Tensor, TensorPointer],
+        pixel_attention_mask: Union[torch.Tensor, TensorPointer] = None,
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
         outputs = self.model(
             input_ids=input_ids,

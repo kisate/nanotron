@@ -4,7 +4,7 @@ Nanotron training script example using a custom dataloader.
 Usage:
 ```
 export CUDA_DEVICE_MAX_CONNECTIONS=1 # important for some distributed operations
-torchrun --nproc_per_node=2 examples/vqa/run_train.py --config-file examples/vqa/config_vqa.yaml
+torchrun --nproc_per_node=1 examples/vqa/run_train.py --config-file examples/vqa/config_vqa.yaml
 ```
 """
 import argparse

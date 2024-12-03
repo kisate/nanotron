@@ -368,7 +368,7 @@ def vqa_process(
         ]
 
         inputs = {
-            k: [v[k] for v in inputs] for k in inputs[0].keys()
+            k: [v[k] for v in inputs] for k in ["input_ids", "pixel_values"]
         }
         
         return inputs
@@ -459,7 +459,8 @@ class DataCollatorForCLM:
         # Cast np.array to torch.Tensor
         result = {k: v if isinstance(v, TensorPointer) else torch.from_numpy(v) for k, v in result.items()}
         return result
-
+    
+@dataclasses.dataclass
 class DataCollatorForVQA:
     sequence_length: int
     input_pp_rank: int
@@ -514,7 +515,7 @@ class DataCollatorForVQA:
             padded_tokens = []
             token_masks = []
 
-            max_seq_length = max([len(examples[i]["pixel_values"][0]) for i in range(len(examples))]) - 1
+            max_seq_length = max([len(examples[i]["input_ids"][0]) for i in range(len(examples))]) - 1
 
             for example in examples:
                 input_ids = example["input_ids"]
