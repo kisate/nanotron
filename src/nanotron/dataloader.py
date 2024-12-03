@@ -480,19 +480,15 @@ class DataCollatorForVQA:
                 "label_ids": TensorPointer(group_rank=self.output_pp_rank),
                 "label_mask": TensorPointer(group_rank=self.output_pp_rank),
                 "pixel_values": TensorPointer(group_rank=self.input_pp_rank),
-                "pixel_attention_mask": TensorPointer(group_rank=self.input_pp_rank)
             }
 
         # Make sure we load only what's necessary, ie we only load a `input_ids` column.
         assert all(list(example.keys()) == ["input_ids", "pixel_values"] for example in examples)
 
         # TODO @nouamanetazi: Is it better to have examples as np.array or torch.Tensor?
-        input_ids = np.vstack([examples[i]["input_ids"] for i in range(len(examples))])
-
         max_n_patches = max([len(examples[i]["pixel_values"][0]) for i in range(len(examples))])
 
         padded_pixel_values = []
-        pixel_attention_masks = []
 
         for example in examples:
             pixel_values = example["pixel_values"]
@@ -503,17 +499,9 @@ class DataCollatorForVQA:
             padded_values = np.pad(pixel_values, pad_width=padding, mode='constant', constant_values=0)
             padded_pixel_values.append(padded_values)
             
-            # Create an attention mask: 1 for actual data, 0 for padded areas
-            mask = np.ones_like(pixel_values)
-            mask = np.pad(mask, pad_width=padding, mode='constant', constant_values=0)
-            pixel_attention_masks.append(mask)
 
         # Step 3: Stack padded pixel_values and pixel_attention_masks
         pixel_values = np.vstack(padded_pixel_values)  # Stacked pixel_values
-        pixel_attention_masks = np.vstack(pixel_attention_masks)  # Stacked masks
-
-        batch_size, expanded_input_length = input_ids.shape
-
         result: Dict[str, Union[np.ndarray, TensorPointer]] = {}
 
         result["input_ids"] = TensorPointer(group_rank=self.input_pp_rank)
@@ -522,15 +510,43 @@ class DataCollatorForVQA:
         result["label_mask"] = TensorPointer(group_rank=self.output_pp_rank)
         result["pixel_values"] = TensorPointer(group_rank=self.input_pp_rank)
 
+        def pad_tokens(inputs = True):
+            padded_tokens = []
+            token_masks = []
+
+            max_seq_length = max([len(examples[i]["pixel_values"][0]) for i in range(len(examples))]) - 1
+
+            for example in examples:
+                input_ids = example["input_ids"]
+                if type(input_ids) == list:
+                    input_ids = np.array(input_ids)
+
+                if inputs:
+                    input_ids = input_ids[:, :-1]
+                else:
+                    input_ids = input_ids[:, 1:]
+
+                current_length = input_ids.shape[1]
+
+                padding = ((0, 0), (0, max_seq_length - current_length))
+                input_ids = np.pad(input_ids, pad_width=padding, mode='constant', constant_values=0)
+                padded_tokens.append(input_ids)
+
+                mask = np.ones((1, current_length), dtype=np.bool_)
+                mask = np.pad(mask, pad_width=padding, mode='constant', constant_values=0)
+                token_masks.append(mask)
+
+            padded_tokens = np.vstack(padded_tokens)
+            token_masks = np.vstack(token_masks)
+
+            return padded_tokens, token_masks
+
         if current_pp_rank == self.input_pp_rank:
-            result["input_ids"] = input_ids[:, :-1]
-            result["input_mask"] = np.ones((batch_size, self.sequence_length), dtype=np.bool_)
+            result["input_ids"], result["input_mask"] = pad_tokens(inputs=True)
             result["pixel_values"] = pixel_values
-            result["pixel_attention_mask"] = pixel_attention_masks
         
         if current_pp_rank == self.output_pp_rank:
-            result["label_ids"] = input_ids[:, 1:]
-            result["label_mask"] = np.ones((batch_size, self.sequence_length), dtype=np.bool_)
+            result["label_ids"], result["label_mask"] = pad_tokens(inputs=False)
 
         result = {k: v if isinstance(v, TensorPointer) else torch.from_numpy(v) for k, v in result.items()}
         return result

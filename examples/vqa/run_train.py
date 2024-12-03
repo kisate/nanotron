@@ -124,6 +124,8 @@ def get_dataloader_from_data_stage(
                 splits=data.dataset.hf_dataset_splits,
             )["train"]
 
+            raw_dataset = raw_dataset.select(range(1000))
+
             processor = AutoProcessor.from_pretrained(tokenizer_path, size= {"longest_edge": 2*364})
             train_dataset = vqa_process(
                 raw_dataset=raw_dataset,

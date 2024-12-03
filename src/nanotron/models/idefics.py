@@ -705,7 +705,7 @@ class Idefics3Model(nn.Module):
         new_inputs_embeds[special_image_token_mask] = reshaped_image_hidden_states
         return new_inputs_embeds
 
-    def forward(
+    def forward_with_hidden_states(
         self,
         input_ids: Union[torch.Tensor, TensorPointer],
         input_mask: Union[torch.Tensor, TensorPointer],
@@ -770,6 +770,17 @@ class Idefics3Model(nn.Module):
         fp32_sharded_logits = self.cast_to_fp32(x=sharded_logits)["output"]
 
         return fp32_sharded_logits, hidden_states
+
+    def forward(
+        self,
+        input_ids: Union[torch.Tensor, TensorPointer],
+        input_mask: Union[torch.Tensor, TensorPointer],
+        pixel_values: Union[torch.Tensor, TensorPointer] = None,
+        pixel_attention_mask: Union[torch.Tensor, TensorPointer] = None,
+    ):
+        return self.forward_with_hidden_states(
+            input_ids=input_ids, input_mask=input_mask, pixel_values=pixel_values, pixel_attention_mask=pixel_attention_mask
+        )[0]
     
     def get_block_compute_costs(self):
         llama_cost = self.llama.get_block_compute_costs()
@@ -826,10 +837,10 @@ class Idefics3ForTraining(NanotronModel):
         )
 
         loss = self.loss(
-            sharded_logits=outputs["sharded_logits"],
+            sharded_logits=outputs,
             label_ids=label_ids,
             label_mask=label_mask,
-        )
+        )["loss"]
 
         return {"loss": loss}
     
