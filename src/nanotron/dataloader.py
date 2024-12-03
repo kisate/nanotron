@@ -489,17 +489,17 @@ class DataCollatorForVQA:
         # TODO @nouamanetazi: Is it better to have examples as np.array or torch.Tensor?
         input_ids = np.vstack([examples[i]["input_ids"] for i in range(len(examples))])
 
-        max_n_patches = max([examples[i]["pixel_values"].shape[1] for i in range(len(examples))])
+        max_n_patches = max([len(examples[i]["pixel_values"][0]) for i in range(len(examples))])
 
         padded_pixel_values = []
         pixel_attention_masks = []
 
         for example in examples:
             pixel_values = example["pixel_values"]
-            current_channels = pixel_values.shape[1]
+            current_patches = len(pixel_values[0])
             
-            # Pad the pixel_values to have max_channels along dimension 1 (channels)
-            padding = ((0, 0), (0, max_n_patches - current_channels), (0, 0), (0, 0), (0, 0))  # Only pad the channel dimension
+            # Pad the pixel_values to have max_n_patches along dimension 1 (channels)
+            padding = ((0, 0), (0, max_n_patches - current_patches), (0, 0), (0, 0), (0, 0))  # Only pad the patches dimension
             padded_values = np.pad(pixel_values, pad_width=padding, mode='constant', constant_values=0)
             padded_pixel_values.append(padded_values)
             
@@ -511,8 +511,6 @@ class DataCollatorForVQA:
         # Step 3: Stack padded pixel_values and pixel_attention_masks
         pixel_values = np.vstack(padded_pixel_values)  # Stacked pixel_values
         pixel_attention_masks = np.vstack(pixel_attention_masks)  # Stacked masks
-
-        # pixel_values = np.vstack([examples[i]["pixel_values"] for i in range(len(examples))])
 
         batch_size, expanded_input_length = input_ids.shape
 
