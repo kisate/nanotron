@@ -71,6 +71,7 @@ def to_int(value: str) -> int:
         return int(value)
     except ValueError:
         return int(value.split("(")[1].split(")")[0])
+        
 @dataclasses.dataclass
 class TensorMetadata:
     # Mandatory for checkpoint version higher than 1.2
