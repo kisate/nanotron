@@ -119,19 +119,20 @@ def main(args):
     image_2 = Image.open(requests.get(url_2, stream=True).raw)
     images = [image_1, image_2]
 
-    target_image_seq_len = int(((364 // nanotron_config.model.model_config.vision_config.patch_size) ** 2) / (nanotron_config.model.model_config.scale_factor**2))
+    # Using non-Idefics3 image size may break the pixel shuffle
+    # For example, instead of 384 you should use either 364 or 404
+    image_size = nanotron_config.model.model_config.vision_config.image_size
+    
+    image_size = 364
 
-    processor = AutoProcessor.from_pretrained("HuggingFaceM4/Idefics3-8B-Llama3", image_seq_len=target_image_seq_len)
+    target_image_seq_len = int(((image_size // nanotron_config.model.model_config.vision_config.patch_size) ** 2) / (nanotron_config.model.model_config.scale_factor**2))
+
+    processor = AutoProcessor.from_pretrained("HuggingFaceM4/Idefics3-8B-Llama3", image_seq_len=target_image_seq_len, size= {"longest_edge": 2*image_size}, max_image_size = {"longest_edge": image_size})
 
     text = processor.apply_chat_template(messages, add_generation_prompt=True)
-    inputs = processor(images=images, text=text, return_tensors="pt").to(DEVICE)
-
-    # labels = inputs.input_ids.clone()
-    # labels[labels == processor.tokenizer.pad_token_id] = -100
-    # labels[labels == model.config.image_token_id] = -100
+    inputs = processor(images=images, text=text, return_tensors="pt", image_seq_len=target_image_seq_len).to(DEVICE)
 
     seq_length = inputs.input_ids.size(1)
-
 
     inputs = {
         "input_ids": inputs['input_ids'],
@@ -143,7 +144,9 @@ def main(args):
     model.eval()
 
     with torch.no_grad():
-        output = model.model(**inputs)[0]
+        output = model.model(**inputs)
+        
+    print(output.shape)
 
     if not RANK:
         predicted_tokens = [5, 27, 34]  # Index of the predictions to compare across models
@@ -174,16 +177,6 @@ def main(args):
                 ],
                 sep="\n",
             )
-
-        # Compute accuracy
-        # predictions = np.argmax(output.transpose(0, 1).cpu(), axis=2).flatten().tolist()
-        # labels = tokens.cpu().flatten()[1:].tolist()
-        # print(f"\nAccuracy: {accuracy_score(labels, predictions)}")
-        # Results
-        ## Nanotron 8B, TP 1: 0.8272058823529411
-        ## Nanotron 8B, TP 2: 0.7720588235294118
-        ## Nanotron 70B, TP 2: 0.8272058823529411
-
 
 if __name__ == "__main__":
     _args = get_args()
