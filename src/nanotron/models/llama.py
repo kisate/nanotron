@@ -765,6 +765,7 @@ class LlamaModel(nn.Module):
         input_ids: Union[torch.Tensor, TensorPointer],  # [batch_size, seq_length]
         input_mask: Union[torch.Tensor, TensorPointer],  # [batch_size, seq_length]
         input_embeds: Optional[torch.Tensor] = None,  # [seq_length, batch_size, hidden_size]
+        return_logits=True,
     ):
         # all tensors are optional as most ranks don't need anything from the dataloader.
 
@@ -779,6 +780,9 @@ class LlamaModel(nn.Module):
             hidden_encoder_states = encoder_block(**hidden_encoder_states)
 
         hidden_states = self.final_layer_norm(input=hidden_encoder_states["hidden_states"])["hidden_states"]
+
+        if not return_logits:
+            return hidden_states
 
         sharded_logits = self.lm_head(x=hidden_states)["logits"]
 

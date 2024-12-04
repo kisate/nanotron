@@ -1,5 +1,4 @@
 import torch
-
 from typing import Dict, Optional, Union
 from torch import nn
 
@@ -23,8 +22,9 @@ from nanotron.generation.generate_store import AttachableStore
 from nanotron.random import RandomStates, branch_random_state
 from nanotron.scaling.parametrization import SpectralMupParametrizator, StandardParametrizator
 from nanotron.utils import checkpoint_method
-from nanotron.models.llama import GLUActivation, LlamaModel, pad_to_right, Loss
+from nanotron.models.llama import GLUActivation, LlamaModel, pad_to_right
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
+from nanotron.parallel.tensor_parallel.functional import sharded_cross_entropy
 
 
 logger = logging.get_logger(__name__)
@@ -52,13 +52,14 @@ class VisionEmbedding(nn.Module, AttachableStore):
         self.num_patches_per_side = self.image_size // self.patch_size
         self.num_patches = self.num_patches_per_side ** 2
         self.num_positions = self.num_patches
+        self.padding_idx = config.llama_config.pad_token_id
 
         self.position_embedding = TensorParallelEmbedding(
             num_embeddings=self.num_positions,
             embedding_dim=self.embed_dim,
-            padding_idx=config.llama_config.pad_token_id,
+            padding_idx=self.padding_idx,
             pg=tp_pg,
-            mode=parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE,
+            mode=TensorParallelLinearMode.ALL_REDUCE,
         )
 
     def forward(self, pixel_values: torch.FloatTensor, patch_attention_mask: torch.BoolTensor) -> Dict[str, torch.Tensor]:
@@ -85,9 +86,17 @@ class VisionEmbedding(nn.Module, AttachableStore):
             pos_ids = (bucket_coords_h[:, None] * self.num_patches_per_side + bucket_coords_w).flatten()
             position_ids[batch_idx][p_attn_mask.view(-1).cpu()] = pos_ids
 
+        first_dim = position_ids.shape[0]
+        group_size = self.tp_pg.size()
+
+        if first_dim % group_size != 0:
+            position_ids = nn.functional.pad(position_ids, (0, 0, 0, group_size - first_dim % group_size), mode="constant", value=self.padding_idx)
+
         position_ids = position_ids.to(self.position_embedding.weight.device)
-        embeddings = embeddings + self.position_embedding(position_ids)
-        # embeddings = embeddings.transpose(0, 1)
+
+        position_ids = self.position_embedding(position_ids)
+
+        embeddings = embeddings + position_ids[:first_dim]
 
         return {
             "embeddings": embeddings,
@@ -649,7 +658,9 @@ class Idefics3Model(nn.Module):
             parallel_context=parallel_context,
             parallel_config=parallel_config,
         )
-
+        
+        del self.llama.lm_head
+        
         self.vision_model = VisionTransformer(
             config=config,
             p2p=self.llama.p2p,
@@ -763,9 +774,10 @@ class Idefics3Model(nn.Module):
             input_ids=None,
             input_embeds=inputs_embeds.transpose(0, 1),
             input_mask=input_mask.transpose(0, 1),
+            return_logits=False
         )
 
-        hidden_states = outputs[1]
+        hidden_states = outputs
 
         sharded_logits = self.lm_head(x=hidden_states)["logits"]
 
@@ -916,3 +928,38 @@ class Idefics3ForTraining(NanotronModel):
             return ["model.llama.token_position_embeddings.pp_block.token_embedding.weight", "model.llama.lm_head.pp_block.weight"]
         else:
             return []
+
+    def get_flops_per_sec(self, iteration_time_in_sec, sequence_length, global_batch_size):
+        return self.model.llama.get_flops_per_sec(iteration_time_in_sec, sequence_length, global_batch_size)
+
+@torch.jit.script
+def masked_mean(loss, label_mask, dtype):
+    # type: (Tensor, Tensor, torch.dtype) -> Tensor
+    return (loss * label_mask).sum(dtype=dtype) / label_mask.sum()
+
+class Loss(nn.Module):
+    def __init__(self, tp_pg: dist.ProcessGroup):
+        super().__init__()
+        self.tp_pg = tp_pg
+
+    def forward(
+        self,
+        sharded_logits: torch.Tensor,  # [seq_length, batch_size, logits]
+        label_ids: torch.Tensor,  # [batch_size, seq_length]
+        label_mask: torch.Tensor,  # [batch_size, seq_length]
+    ) -> Dict[str, torch.Tensor]:
+        # Megatron by defaults cast everything in fp32. `--f16-lm-cross-entropy` is an option you can use to keep current precision.
+        # https://github.com/NVIDIA/Megatron-LM/blob/f267e6186eae1d6e2055b412b00e2e545a8e896a/megatron/model/gpt_model.py#L38
+
+        print("sharded_logits", sharded_logits.shape)
+        print("label_ids", label_ids.shape)
+        print("label_mask", label_mask.shape)
+
+        loss = sharded_cross_entropy(
+            sharded_logits, label_ids.transpose(0, 1).contiguous(), group=self.tp_pg, dtype=torch.float
+        ).transpose(0, 1)
+        # TODO @thomasw21: It's unclear what kind of normalization we want to do.
+        loss = masked_mean(loss, label_mask, dtype=torch.float)
+        # I think indexing causes a sync we don't actually want
+        # loss = loss[label_mask].sum()
+        return {"loss": loss}
