@@ -125,6 +125,45 @@ class DifferentiableReduceScatterSum(torch.autograd.Function):
         return DifferentiableAllGather.apply(grad_output, group), None
 
 
+class DifferetiableScatter(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, tensor, group: Optional[ProcessGroup]):
+        ctx.group = group
+        
+        if group.size() == 1:
+            return tensor
+
+        # TODO: scatter along another dimension
+        unsharded_batch_size, *rest_size = tensor.shape
+        if group is None:
+            group = torch_dist.distributed_c10d._get_default_group()
+        assert unsharded_batch_size % group.size() == 0
+
+        tensor = tensor.contiguous()
+
+        sharded_tensor = torch.empty(
+            unsharded_batch_size // group.size(),
+            *rest_size,
+            device=tensor.device,
+            dtype=tensor.dtype,
+            requires_grad=False,
+        )
+
+        if group.rank() == 0:
+            tensor_list = list(torch.split(tensor, unsharded_batch_size // group.size(), dim=0))
+        else:
+            tensor_list = None
+
+        dist.scatter(sharded_tensor, tensor_list, src=0, group=group)
+        return sharded_tensor
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        group = ctx.group
+        return DifferentiableAllGather.apply(grad_output, group), None
+
+
 # -----------------
 # Helper functions.
 # -----------------
@@ -144,3 +183,6 @@ def differentiable_all_gather(tensor, group: Optional[ProcessGroup] = None):
 
 def differentiable_reduce_scatter_sum(tensor, group: Optional[ProcessGroup] = None):
     return DifferentiableReduceScatterSum.apply(tensor, group)
+
+def differentiable_scatter(tensor, group: Optional[ProcessGroup] = None):
+    return DifferetiableScatter.apply(tensor, group)

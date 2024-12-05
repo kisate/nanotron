@@ -14,7 +14,7 @@ from nanotron.parallel.parameters import NanotronParameter
 from nanotron.parallel.pipeline_parallel.block import PipelineBlock
 from nanotron.parallel.pipeline_parallel.p2p import P2P
 from nanotron.parallel.pipeline_parallel.tensor_pointer import TensorPointer
-from nanotron.parallel.tensor_parallel.distributed_differentiable_primitives import differentiable_all_gather, differentiable_identity
+from nanotron.parallel.tensor_parallel.distributed_differentiable_primitives import differentiable_all_gather, differentiable_identity, differentiable_scatter
 from nanotron.parallel.tensor_parallel.enum import TensorParallelLinearMode
 from nanotron.parallel.tensor_parallel.nn import TensorParallelColumnLinear, TensorParallelEmbedding, TensorParallelRowLinear
 from nanotron.distributed import dist
@@ -685,9 +685,9 @@ class Idefics3Model(nn.Module):
                 "pg": parallel_context.tp_pg,
                 "bias": False,
                 # TODO @thomasw21: refactor so that we store that default in a single place.
-                "mode": TensorParallelLinearMode.ALL_REDUCE,
+                "mode": self.tp_mode,
                 "async_communication": tp_linear_async_communication,
-                "tp_recompute_allgather": False,
+                "tp_recompute_allgather": parallel_config.tp_recompute_allgather,
             },
             module_input_keys={"x"},
             module_output_keys={"logits"},
@@ -776,10 +776,20 @@ class Idefics3Model(nn.Module):
             image_hidden_states=image_hidden_states["hidden_states"],
         )
 
+        inputs_embeds = inputs_embeds.transpose(0, 1)
+        input_mask=input_mask.transpose(0, 1)
+
+        if self.tp_mode is TensorParallelLinearMode.ALL_REDUCE:
+            inputs_embeds = differentiable_identity(inputs_embeds, group=self.tp_gp)
+        elif self.tp_mode is TensorParallelLinearMode.REDUCE_SCATTER:
+            inputs_embeds = differentiable_scatter(inputs_embeds, group=self.tp_gp)
+        else:
+            raise ValueError(f"Got unexpected mode: {self.tp_mode}.") 
+        
         outputs = self.llama.forward_with_hidden_states(
             input_ids=None,
-            input_embeds=inputs_embeds.transpose(0, 1),
-            input_mask=input_mask.transpose(0, 1),
+            input_embeds=inputs_embeds,
+            input_mask=input_mask,
             return_logits=False
         )
 
@@ -957,13 +967,6 @@ class Loss(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         # Megatron by defaults cast everything in fp32. `--f16-lm-cross-entropy` is an option you can use to keep current precision.
         # https://github.com/NVIDIA/Megatron-LM/blob/f267e6186eae1d6e2055b412b00e2e545a8e896a/megatron/model/gpt_model.py#L38
-
-        print(
-            "Loss",
-            sharded_logits.shape,
-            label_ids.shape,
-            label_mask.shape
-        )
         
         loss = sharded_cross_entropy(
             sharded_logits, label_ids.transpose(0, 1).contiguous(), group=self.tp_pg, dtype=torch.float
