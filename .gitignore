@@ -167,3 +167,4 @@ wandb/
 nanotron-ckpt/*
 nanotron-ckpt-idefics3/*
 nanotron_checkpoints/*
+nanotron-ckpt-vit/*

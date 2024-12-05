@@ -35,15 +35,15 @@ class VisionEmbedding(nn.Module, AttachableStore):
     """
     Sharded implementation of the Idefics3VisionEmbeddings from huggingface for nanotron. Uses CLIPVit for megatron as a reference.
     """
-    def __init__(self, tp_pg: dist.ProcessGroup, config: Idefics3Config, parallel_config: Optional[ParallelismArgs]):
+    def __init__(self, tp_pg: dist.ProcessGroup, config: Idefics3VisionConfig, parallel_config: Optional[ParallelismArgs]):
         super().__init__()
         self.tp_pg = tp_pg
-        self.embed_dim = config.vision_config.hidden_size
-        self.image_size = config.vision_config.image_size
-        self.patch_size = config.vision_config.patch_size
+        self.embed_dim = config.hidden_size
+        self.image_size = config.image_size
+        self.patch_size = config.patch_size
 
         self.patch_embedding = nn.Conv2d(
-            in_channels=config.vision_config.num_channels,
+            in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
             stride=self.patch_size,
@@ -53,12 +53,10 @@ class VisionEmbedding(nn.Module, AttachableStore):
         self.num_patches_per_side = self.image_size // self.patch_size
         self.num_patches = self.num_patches_per_side ** 2
         self.num_positions = self.num_patches
-        self.padding_idx = config.llama_config.pad_token_id
 
         self.position_embedding = TensorParallelEmbedding(
             num_embeddings=self.num_positions,
             embedding_dim=self.embed_dim,
-            padding_idx=self.padding_idx,
             pg=tp_pg,
             mode=TensorParallelLinearMode.ALL_REDUCE,
         )
@@ -91,7 +89,7 @@ class VisionEmbedding(nn.Module, AttachableStore):
         group_size = self.tp_pg.size()
 
         if first_dim % group_size != 0:
-            position_ids = nn.functional.pad(position_ids, (0, 0, 0, group_size - first_dim % group_size), mode="constant", value=self.padding_idx)
+            position_ids = nn.functional.pad(position_ids, (0, 0, 0, group_size - first_dim % group_size), mode="constant", value=0)
 
         position_ids = position_ids.to(self.position_embedding.weight.device)
 
@@ -407,7 +405,7 @@ class VisionEncoderLayer(nn.Module):
 class VisionTransformer(nn.Module):
     def __init__(
         self, 
-        config: Idefics3Config,
+        config: Idefics3VisionConfig,
         p2p: P2P,
         parallel_context: ParallelContext,
         parallel_config: Optional[ParallelismArgs],
@@ -440,7 +438,7 @@ class VisionTransformer(nn.Module):
                     p2p=self.p2p,
                     module_builder=VisionEncoderLayer,
                     module_kwargs={
-                        "config": config.vision_config,
+                        "config": config,
                         "parallel_config": parallel_config,
                         "tp_pg": parallel_context.tp_pg,
                         "layer_id": i,
@@ -455,14 +453,14 @@ class VisionTransformer(nn.Module):
                     }
                 )
 
-                for i in range(config.vision_config.num_hidden_layers)
+                for i in range(config.num_hidden_layers)
             ]
         )
 
         self.post_layernorm = PipelineBlock(
             p2p=self.p2p,
             module_builder=TritonLayerNorm,
-            module_kwargs={"normalized_shape": config.vision_config.hidden_size, "eps": config.vision_config.layer_norm_eps},
+            module_kwargs={"normalized_shape": config.hidden_size, "eps": config.layer_norm_eps},
             module_input_keys={
                 "input"
             },
@@ -479,7 +477,7 @@ class VisionTransformer(nn.Module):
         batch_size = pixel_values.size(0)
 
         if patch_attention_mask is None:
-            patch_size = self.config.vision_config.patch_size
+            patch_size = self.config.patch_size
             patch_attention_mask = torch.ones(
                 (
                     batch_size,
@@ -511,7 +509,7 @@ class VisionTransformer(nn.Module):
         return hidden_states
     
     def get_block_compute_costs(self):
-        config = self.config.vision_config
+        config = self.config
         d_ff = config.intermediate_size
         d_qkv = config.hidden_size // config.num_attention_heads
 
@@ -665,7 +663,7 @@ class Idefics3Model(nn.Module):
         del self.llama.lm_head
         
         self.vision_model = VisionTransformer(
-            config=config,
+            config=config.vision_config,
             p2p=self.llama.p2p,
             parallel_context=parallel_context,
             parallel_config=parallel_config,
@@ -949,6 +947,104 @@ class Idefics3ForTraining(NanotronModel):
     def get_flops_per_sec(self, iteration_time_in_sec, sequence_length, global_batch_size):
         return self.model.llama.get_flops_per_sec(iteration_time_in_sec, sequence_length, global_batch_size)
 
+
+class VisionTransformerNanotron(NanotronModel):
+    def __init__(
+        self,
+        config: Idefics3VisionConfig,
+        parallel_context: ParallelContext,
+        parallel_config: Optional[ParallelismArgs],
+        random_states: Optional[RandomStates] = None,
+    ):
+        super().__init__()
+
+        p2p = P2P(parallel_context.pp_pg, device=torch.device("cuda"))
+
+        self.model = VisionTransformer(
+            config=config,
+            p2p=p2p,
+            parallel_context=parallel_context,
+            parallel_config=parallel_config,
+        )
+
+        self.parallel_context = parallel_context
+        self.config = config
+        self.parallel_config = parallel_config
+
+    def forward(
+        self,
+        pixel_values: Union[torch.Tensor, TensorPointer],
+        patch_attention_mask: Union[torch.Tensor, TensorPointer],
+    ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
+        return self.model(pixel_values=pixel_values, patch_attention_mask=patch_attention_mask)
+
+    @torch.no_grad()
+    def init_model_randomly(self, config: Config):
+        """Initialize model parameters randomly.
+        Note:
+            Layernorm weight all 0 or 1 depending on `apply_layernorm_1p`
+        """
+        init_method = config.model.init_method
+        if isinstance(init_method, RandomInit):
+            parametrizator_cls = StandardParametrizator
+        elif isinstance(init_method, SpectralMupInit):
+            parametrizator_cls = SpectralMupParametrizator
+        else:
+            raise ValueError(f"Unknown init method {init_method}")
+
+        parametrizator = parametrizator_cls(config=config.model)
+
+        log_rank(
+            f"Parametrizing model parameters using {parametrizator.__class__.__name__}",
+            logger=logger,
+            level=logging.INFO,
+            rank=0,
+        )
+
+        model = self
+        initialized_parameters = set()
+        # Handle tensor parallelism
+        module_id_to_prefix = {id(module): f"{module_name}." for module_name, module in model.named_modules()}
+        # Fix the root_model
+        module_id_to_prefix[id(model)] = ""
+
+        for param_name, param in model.named_parameters():
+            assert isinstance(param, NanotronParameter)
+
+            module_name, param_name = param_name.rsplit(".", 1)
+
+            if param.is_tied:
+                tied_info = param.get_tied_info()
+                full_param_name = tied_info.get_full_name_from_module_id_to_prefix(
+                    module_id_to_prefix=module_id_to_prefix
+                )
+            else:
+                full_param_name = f"{module_name}.{param_name}"
+
+            if full_param_name in initialized_parameters:
+                # Already initialized
+                continue
+
+            module = model.get_submodule(module_name)
+            parametrizator.parametrize(param_name, module)
+
+            assert full_param_name not in initialized_parameters
+            initialized_parameters.add(full_param_name)
+
+        assert initialized_parameters == {
+            param.get_tied_info().get_full_name_from_module_id_to_prefix(module_id_to_prefix=module_id_to_prefix)
+            if param.is_tied
+            else name
+            for name, param in model.named_parameters()
+        }, f"Somehow the initialized set of parameters don't match:\n - Expected: { {name for name, _ in model.named_parameters()} }\n - Got: {initialized_parameters}"
+
+    def get_block_compute_costs(self):
+        return self.model.get_block_compute_costs()
+
+    def get_embeddings_lm_head_tied_names(self):
+        """Get the names of the tied embeddings and lm_head weights"""
+        return []
+    
 @torch.jit.script
 def masked_mean(loss, label_mask, dtype):
     # type: (Tensor, Tensor, torch.dtype) -> Tensor

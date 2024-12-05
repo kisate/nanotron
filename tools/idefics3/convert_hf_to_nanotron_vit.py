@@ -1,7 +1,9 @@
 """
-HF_HUB_ENABLE_HF_TRANSFER=1 torchrun --nproc-per-node 1 tools/idefics3/convert_hf_to_nanotron.py --nanotron-checkpoint-path nanotron-ckpt --pretrained-model-name-or-path HuggingFaceM4/Idefics3-8B-Llama3
+HF_HUB_ENABLE_HF_TRANSFER=1 torchrun --nproc-per-node 1 tools/idefics3/convert_hf_to_nanotron_vit.py --nanotron-checkpoint-path nanotron-ckpt-vit --pretrained-model-name-or-path HuggingFaceM4/Idefics3-8B-Llama3
 """
 import sys
+
+from nanotron.parallel.pipeline_parallel.p2p import P2P
 sys.path.append('.venv/lib/python3.10/site-packages')
 
 import argparse
@@ -18,140 +20,15 @@ from nanotron.config.parallelism_config import ParallelismArgs
 from nanotron.logging import log_rank, set_ranks_logging_level
 from nanotron.config.models_config import LlamaConfig as LlamaConfigNanotron
 from nanotron.models.base import build_model
-from nanotron.models.idefics import Idefics3ForTraining, Idefics3Model, VisionTransformer
+from nanotron.models.idefics import VisionTransformerNanotron, VisionTransformer
 from nanotron.parallel.context import ParallelContext
 from nanotron.parallel.parameters import sanity_check
 from nanotron.serialize.weights import save_weights
 from nanotron.trainer import mark_tied_parameters
+# from tools.llama3.convert_hf_to_nanotron import copy_weights_from_hf_to_nanotron as copy_weights_from_hf_to_nanotron_llama
+# from tools.llama3.convert_hf_to_nanotron import nanotron_config_from_hf_config as nanotron_config_from_hf_config_llama
 
 from transformers import AutoModelForVision2Seq, AutoTokenizer, AutoModel
-
-
-def copy_weights_from_hf_to_nanotron_llama(nanotron_model, hf_model, nanotron_config, 
-    additional_vocab_size):
-    nanotron_llama_config = nanotron_config.llama_config
-    # Copy params from HF to Nanotron
-    log_rank("Copying weights from HF model to Nanotron model...", logger=logger, level=logging.INFO, rank=0)
-    # Token embeddings
-    log_rank("Copying Token Embeddings...", logger=logger, level=logging.INFO, rank=0)
-
-    hf_vocab_size = hf_model.config.vocab_size
-
-    assert (
-        nanotron_model.token_position_embeddings.pp_block.token_embedding.weight[:hf_vocab_size].shape
-        == hf_model.embed_tokens.weight.shape
-    )
-    with torch.no_grad():
-        nanotron_model.token_position_embeddings.pp_block.token_embedding.weight[:hf_vocab_size].copy_(
-            hf_model.embed_tokens.weight
-        )
-
-    # Decoder layers
-    for i in tqdm(
-        range(nanotron_llama_config.num_hidden_layers),
-        desc="Copying Hidden Layers",
-        total=nanotron_llama_config.num_hidden_layers,
-    ):
-        # Input layer norm
-        assert (
-            hf_model.layers[i].input_layernorm.weight.shape
-            == nanotron_model.decoder[i].pp_block.input_layernorm.weight.shape
-        )
-        with torch.no_grad():
-            nanotron_model.decoder[i].pp_block.input_layernorm.weight.copy_(
-                hf_model.layers[i].input_layernorm.weight
-            )
-
-        # Self attn
-        ## QKV
-        tmp_qkv_proj = torch.cat(
-            [
-                hf_model.layers[i].self_attn.q_proj.weight,
-                hf_model.layers[i].self_attn.k_proj.weight,
-                hf_model.layers[i].self_attn.v_proj.weight,
-            ],
-            dim=0,
-        )
-        assert tmp_qkv_proj.shape == nanotron_model.decoder[i].pp_block.attn.qkv_proj.weight.shape
-        with torch.no_grad():
-            nanotron_model.decoder[i].pp_block.attn.qkv_proj.weight.copy_(tmp_qkv_proj)
-
-        ## O
-        assert (
-            hf_model.layers[i].self_attn.o_proj.weight.shape
-            == nanotron_model.decoder[i].pp_block.attn.o_proj.weight.shape
-        )
-        with torch.no_grad():
-            nanotron_model.decoder[i].pp_block.attn.o_proj.weight.copy_(
-                hf_model.layers[i].self_attn.o_proj.weight
-            )
-
-        # MLP
-        ## Gate Up Proj
-        tmp_gate_up_proj = torch.cat(
-            [
-                hf_model.layers[i].mlp.gate_proj.weight,
-                hf_model.layers[i].mlp.up_proj.weight,
-            ],
-            dim=0,
-        )
-
-        assert tmp_gate_up_proj.shape == nanotron_model.decoder[i].pp_block.mlp.gate_up_proj.weight.shape
-        with torch.no_grad():
-            nanotron_model.decoder[i].pp_block.mlp.gate_up_proj.weight.copy_(tmp_gate_up_proj)
-
-        ## Down Proj
-        assert (
-            hf_model.layers[i].mlp.down_proj.weight.shape
-            == nanotron_model.decoder[i].pp_block.mlp.down_proj.weight.shape
-        )
-        with torch.no_grad():
-            nanotron_model.decoder[i].pp_block.mlp.down_proj.weight.copy_(
-                hf_model.layers[i].mlp.down_proj.weight
-            )
-
-        # Post attn layer norm
-        assert (
-            hf_model.layers[i].post_attention_layernorm.weight.shape
-            == nanotron_model.decoder[i].pp_block.post_attention_layernorm.weight.shape
-        )
-        with torch.no_grad():
-            nanotron_model.decoder[i].pp_block.post_attention_layernorm.weight.copy_(
-                hf_model.layers[i].post_attention_layernorm.weight
-            )
-
-        # Last layer norm
-        log_rank("Copying Final Layer Norm...", logger=logger, level=logging.INFO, rank=0)
-        assert nanotron_model.final_layer_norm.pp_block.weight.shape == hf_model.norm.weight.shape
-        with torch.no_grad():
-            nanotron_model.final_layer_norm.pp_block.weight.copy_(hf_model.norm.weight)
-
-        log_rank("Copying LM Head...", logger=logger, level=logging.INFO, rank=0)
-
-def nanotron_config_from_hf_config_llama(hf_config, additional_vocab_size=3):
-    return LlamaConfigNanotron(
-        bos_token_id=hf_config.bos_token_id,
-        eos_token_id=hf_config.eos_token_id,
-        hidden_act=hf_config.hidden_act,
-        hidden_size=hf_config.hidden_size,
-        initializer_range=hf_config.initializer_range,
-        intermediate_size=hf_config.intermediate_size,
-        is_llama_config=True,
-        max_position_embeddings=hf_config.max_position_embeddings,
-        num_attention_heads=hf_config.num_attention_heads,
-        num_hidden_layers=hf_config.num_hidden_layers,
-        num_key_value_heads=hf_config.num_key_value_heads,
-        pad_token_id=None,
-        pretraining_tp=hf_config.pretraining_tp,
-        rms_norm_eps=hf_config.rms_norm_eps,
-        rope_scaling=hf_config.rope_scaling,
-        rope_theta=hf_config.rope_theta,
-        rope_interleaved=False,
-        tie_word_embeddings=hf_config.tie_word_embeddings,
-        use_cache=hf_config.use_cache,
-        vocab_size=hf_config.vocab_size + additional_vocab_size,
-    )
-
 
 
 logger = logging.get_logger(__name__)
@@ -352,38 +229,7 @@ def copy_weights_from_hf_to_nanotron_vision(
     log_rank("Copied Post Layer Norm", logger=logger, level=logging.INFO, rank=0)
 
 
-def copy_weights_from_hf_to_nanotron_remaining(
-    nanotron_model: Idefics3Model,
-    hf_model: AutoModel,
-    nanotron_config: Idefics3Config
-):
-    log_rank("Copying weights from Idefic3 Connector to Nanotron model...", logger=logger, level=logging.INFO, rank=0)
-
-    assert (
-        nanotron_model.connector.modality_projector.pp_block.proj.weight.shape == hf_model.model.connector.modality_projection.proj.weight.shape
-    )
-
-    with torch.no_grad():
-        nanotron_model.connector.modality_projector.pp_block.proj.weight.copy_(hf_model.model.connector.modality_projection.proj.weight)
-
-    log_rank("Copied Connector", logger=logger, level=logging.INFO, rank=0)
-
-    log_rank("Copying weights from Idefic3 Head to Nanotron model...", logger=logger, level=logging.INFO, rank=0)
-    
-    vocab_size = hf_model.vocab_size
-
-    assert (
-        nanotron_model.lm_head.pp_block.weight[:vocab_size].shape == hf_model.lm_head.weight.shape
-    )
-
-    with torch.no_grad():
-        nanotron_model.lm_head.pp_block.weight[:vocab_size].copy_(hf_model.lm_head.weight)
-        
-    log_rank("Copied Head", logger=logger, level=logging.INFO, rank=0)
-
-
 def main(args):
-    additional_vocab_size = 1
     # Init Nanotron Parallel Utilities
     parallel_config = ParallelismArgs(dp=1, pp=1, tp=1)
 
@@ -409,8 +255,6 @@ def main(args):
     hf_config = hf_model.config
     hf_config_vision = hf_config.vision_config
 
-    # Set Nanotron LlamaConfig
-    nanotron_llama_config = nanotron_config_from_hf_config_llama(hf_config.text_config, additional_vocab_size)
 
     # Set Nanotron SigLIPConfig
     nanotron_vision_config = Idefics3VisionConfig(
@@ -428,19 +272,12 @@ def main(args):
         is_using_mup=False    
     )
     
-    nanotron_idefics3_config = Idefics3Config(
-        llama_config=nanotron_llama_config,
-        vision_config=nanotron_vision_config,
-        image_token_id=hf_config.image_token_id,
-        pad_token_id=hf_config.vision_config.pad_token_id,
-        scale_factor=hf_config.scale_factor,
-        vocab_size=nanotron_llama_config.vocab_size
-    )
     # Init Idefics3 Nanotron model
     log_rank("Init empty Nanotron Idefics3 Model", logger=logger, level=logging.INFO, rank=0)
+    
     nanotron_model = build_model(
-        model_builder=lambda: Idefics3ForTraining(
-            config=nanotron_idefics3_config,
+        model_builder=lambda: VisionTransformerNanotron(
+            config=nanotron_vision_config,
             parallel_context=parallel_context,
             parallel_config=parallel_config,
         ),
@@ -453,31 +290,12 @@ def main(args):
     sanity_check(root_module=nanotron_model)
 
     copy_weights_from_hf_to_nanotron_vision(
-        nanotron_model=nanotron_model.model.vision_model,
+        nanotron_model=nanotron_model.model,
         hf_model=hf_model.model.vision_model,
         nanotron_vision_config=nanotron_vision_config,
     )
 
     log_rank("Copied weights from HF SigLIP model to Nanotron model!", logger=logger, level=logging.INFO, rank=0)
-
-    
-    
-    # Copy weights from HF to Nanotron
-    copy_weights_from_hf_to_nanotron_llama(
-        nanotron_model=nanotron_model.model.llama,
-        hf_model=hf_model.model.text_model,
-        nanotron_config=nanotron_idefics3_config,
-        additional_vocab_size=additional_vocab_size,
-    )
-
-    log_rank("Copied weights from HF Llama model to Nanotron model!", logger=logger, level=logging.INFO, rank=0)
-
-    
-    copy_weights_from_hf_to_nanotron_remaining(
-        nanotron_model=nanotron_model.model,
-        hf_model=hf_model,
-        nanotron_config=nanotron_idefics3_config,
-    )
 
     nanotron_checkpoint_path = Path(
         args.nanotron_checkpoint_path
@@ -496,7 +314,7 @@ def main(args):
             parallelism=parallel_config,
             model=ModelArgs(
                 init_method=ExistingCheckpointInit(nanotron_checkpoint_path),
-                model_config=nanotron_idefics3_config,
+                model_config=nanotron_vision_config,
             ),
             tokenizer=TokenizerArgs(nanotron_checkpoint_path),
         )
@@ -505,7 +323,7 @@ def main(args):
 
     with open(nanotron_checkpoint_path / "model_config.json", "w") as f:
         log_rank("Saving model config ...", logger=logger, level=logging.INFO, rank=0)
-        json.dump(asdict(nanotron_idefics3_config), f)
+        json.dump(asdict(nanotron_vision_config), f)
 
     log_rank(
         f"Checkpoint conversion finished, check {args.nanotron_checkpoint_path}",
