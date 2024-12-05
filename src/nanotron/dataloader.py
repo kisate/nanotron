@@ -466,6 +466,7 @@ class DataCollatorForVQA:
     input_pp_rank: int
     output_pp_rank: int
     parallel_context: ParallelContext
+    padding_idx: int = 128_002
 
     def __call__(self, examples: List[Dict[str, List[np.ndarray]]]) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
         # Process the case when current rank doesn't require data. We return `TensorPointer` that points to ranks having the data.
@@ -516,6 +517,8 @@ class DataCollatorForVQA:
             token_masks = []
 
             max_seq_length = max([len(examples[i]["input_ids"][0]) for i in range(len(examples))]) - 1
+            # make it divisible by 4 for tp
+            max_seq_length = max_seq_length + (4 - max_seq_length % 4) % 4
 
             for example in examples:
                 input_ids = example["input_ids"]
@@ -530,7 +533,7 @@ class DataCollatorForVQA:
                 current_length = input_ids.shape[1]
 
                 padding = ((0, 0), (0, max_seq_length - current_length))
-                input_ids = np.pad(input_ids, pad_width=padding, mode='constant', constant_values=0)
+                input_ids = np.pad(input_ids, pad_width=padding, mode='constant', constant_values=self.padding_idx)
                 padded_tokens.append(input_ids)
 
                 mask = np.ones((1, current_length), dtype=np.bool_)

@@ -14,6 +14,7 @@ from nanotron.parallel.parameters import NanotronParameter
 from nanotron.parallel.pipeline_parallel.block import PipelineBlock
 from nanotron.parallel.pipeline_parallel.p2p import P2P
 from nanotron.parallel.pipeline_parallel.tensor_pointer import TensorPointer
+from nanotron.parallel.tensor_parallel.distributed_differentiable_primitives import differentiable_all_gather, differentiable_identity
 from nanotron.parallel.tensor_parallel.enum import TensorParallelLinearMode
 from nanotron.parallel.tensor_parallel.nn import TensorParallelColumnLinear, TensorParallelEmbedding, TensorParallelRowLinear
 from nanotron.distributed import dist
@@ -643,12 +644,14 @@ class Idefics3Model(nn.Module):
         config: Idefics3Config,
         parallel_context: ParallelContext,
         parallel_config: Optional[ParallelismArgs],
+        tp_gp: dist.ProcessGroup,
     ):
         super().__init__()
 
         self.config = config
         self.image_token_id = config.image_token_id
         self.tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
+        self.tp_gp = tp_gp
         tp_linear_async_communication = (
             parallel_config.tp_linear_async_communication if parallel_config is not None else False
         )
@@ -672,10 +675,6 @@ class Idefics3Model(nn.Module):
             config, parallel_config, parallel_context.tp_pg, self.llama.p2p
         )
 
-        self.image_seq_len = int(
-            ((config.vision_config.image_size // config.vision_config.patch_size) ** 2) / (config.scale_factor**2)
-        )
-
         self.lm_head = PipelineBlock(
             p2p=self.llama.p2p,
             # Understand that this means that we return sharded logits that are going to need to be gathered
@@ -686,13 +685,14 @@ class Idefics3Model(nn.Module):
                 "pg": parallel_context.tp_pg,
                 "bias": False,
                 # TODO @thomasw21: refactor so that we store that default in a single place.
-                "mode": self.tp_mode,
+                "mode": TensorParallelLinearMode.ALL_REDUCE,
                 "async_communication": tp_linear_async_communication,
-                "tp_recompute_allgather": parallel_config.tp_recompute_allgather,
+                "tp_recompute_allgather": False,
             },
             module_input_keys={"x"},
             module_output_keys={"logits"},
         )
+
 
         self.cast_to_fp32 = PipelineBlock(
             p2p=self.llama.p2p,
@@ -708,7 +708,6 @@ class Idefics3Model(nn.Module):
             inputs_embeds: Union[torch.Tensor, TensorPointer],
             image_hidden_states: Union[torch.Tensor, TensorPointer],
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
-
         num_images, _, vision_hidden_size = image_hidden_states.shape
         special_image_token_mask = input_ids == self.image_token_id
         new_inputs_embeds = inputs_embeds.clone()
@@ -762,11 +761,18 @@ class Idefics3Model(nn.Module):
             hidden_states=image_hidden_states
         )
 
-        inputs_embeds = self.llama.token_position_embeddings(input_ids=input_ids, input_mask=input_mask)
+        inputs_embeds = self.llama.token_position_embeddings(input_ids=input_ids, input_mask=input_mask)["input_embeds"]
+
+        if self.tp_mode is TensorParallelLinearMode.ALL_REDUCE:
+            inputs_embeds = differentiable_identity(inputs_embeds, group=self.tp_gp)
+        elif self.tp_mode is TensorParallelLinearMode.REDUCE_SCATTER:
+            inputs_embeds = differentiable_all_gather(inputs_embeds, group=self.tp_gp)
+        else:
+            raise ValueError(f"Got unexpected mode: {self.tp_mode}.")
 
         inputs_embeds = self.inputs_merger(
             input_ids=input_ids,
-            inputs_embeds=inputs_embeds["input_embeds"].transpose(0, 1),
+            inputs_embeds=inputs_embeds.transpose(0, 1),
             image_hidden_states=image_hidden_states["hidden_states"],
         )
 
@@ -817,6 +823,7 @@ class Idefics3ForTraining(NanotronModel):
             config=config,
             parallel_context=parallel_context,
             parallel_config=parallel_config,
+            tp_gp=parallel_context.tp_pg
         )
 
         self.loss = PipelineBlock(
@@ -950,6 +957,13 @@ class Loss(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         # Megatron by defaults cast everything in fp32. `--f16-lm-cross-entropy` is an option you can use to keep current precision.
         # https://github.com/NVIDIA/Megatron-LM/blob/f267e6186eae1d6e2055b412b00e2e545a8e896a/megatron/model/gpt_model.py#L38
+
+        print(
+            "Loss",
+            sharded_logits.shape,
+            label_ids.shape,
+            label_mask.shape
+        )
         
         loss = sharded_cross_entropy(
             sharded_logits, label_ids.transpose(0, 1).contiguous(), group=self.tp_pg, dtype=torch.float
