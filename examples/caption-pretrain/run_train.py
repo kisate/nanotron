@@ -1,0 +1,158 @@
+"""
+Nanotron training script example using a custom dataloader.
+
+Usage:
+```
+export CUDA_DEVICE_MAX_CONNECTIONS=1 # important for some distributed operations
+torchrun --nproc_per_node=1 examples/caption-pretrain/run_train.py --config-file examples/caption-pretrain/pretrain.yaml
+```
+"""
+import argparse
+from typing import Dict, cast
+
+import datasets
+import numpy as np
+from nanotron import logging
+from nanotron.config import (
+    DataArgs,
+    DatasetStageArgs,
+)
+from nanotron.config.config import ImageDatasetsArgs
+from nanotron.logging import log_rank
+from nanotron.parallel.pipeline_parallel.utils import get_input_output_pp_ranks
+from nanotron.trainer import DistributedTrainer
+from nanotron.modular_dataloader.iterable import get_train_dataloader
+from nanotron.modular_dataloader import SAMPLE_ENCODERS, BATCH_ENCODERS
+from torchdata.stateful_dataloader import StatefulDataLoader
+
+
+
+try:
+    from huggingface_hub import __version__ as hf_hub_version
+    from transformers import AutoTokenizer
+    from transformers import AutoProcessor
+    from transformers import __version__ as tf_version
+except ImportError:
+    hf_hub_version = None
+    tf_version = None
+
+logger = logging.get_logger(__name__)
+
+
+def get_dataloader_from_data_stage(
+    trainer: DistributedTrainer,
+    data: DataArgs,
+):
+    """
+    Returns a dataloader for a given data stage.
+
+    data: The data configuration for the current stage.
+    """
+
+    # First, we need to know which ranks to feed the dataloader to
+    input_pp_rank, output_pp_rank = get_input_output_pp_ranks(model=trainer.model)
+
+    if isinstance(data.dataset, ImageDatasetsArgs):
+        log_rank("Using iterable dataset from `datasets` library", logger=logger, level=logging.INFO, rank=0)
+        tokenizer_path = trainer.config.tokenizer.tokenizer_name_or_path
+        log_rank(
+            f"Loading tokenizer from {tokenizer_path} with HF version {hf_hub_version} and Transformers version {tf_version}",
+            logger=logger,
+            level=logging.INFO,
+            rank=0,
+        )
+
+        dataset = datasets.load_dataset(
+            data.dataset.hf_dataset_name_or_type,
+            data_dir=data.dataset.hf_dataset_data_dir,
+            split=data.dataset.hf_dataset_splits,
+            streaming=True,
+        )["train"]
+
+        processor = AutoProcessor.from_pretrained(
+            tokenizer_path,
+            size={"longest_edge": data.dataset.image_size * data.dataset.image_scale_factor},
+        ) 
+
+        sample_encoder = SAMPLE_ENCODERS[data.dataset.sample_encoder](
+            **data.dataset.sample_encoder_args
+        )
+
+        batch_encoder = BATCH_ENCODERS[data.dataset.batch_encoder](
+            input_pp_rank=input_pp_rank,
+            output_pp_rank=output_pp_rank,
+            parallel_context=trainer.parallel_context,
+            processor=processor,
+            sequence_length=trainer.sequence_length,
+            **data.dataset.batch_encoder_args
+        )
+
+        dataloader = get_train_dataloader(
+            train_dataset=dataset,
+            sample_encoder=sample_encoder,
+            batch_encoder=batch_encoder,
+            parallel_context=trainer.parallel_context,
+            sequence_length=trainer.sequence_length,
+            parallel_context=trainer.parallel_context,
+            input_pp_rank=input_pp_rank,
+            output_pp_rank=output_pp_rank,
+            micro_batch_size=trainer.micro_batch_size,
+            processing_batch_size=data.dataset.processing_batch_size,
+            seed_worker=data.seed,
+            sample_encoding_workers=data.dataset.sample_encoding_workers,
+            batch_encoding_workers=data.dataset.batch_encoding_workers,
+            drop_last=True,
+            dataloader_state=None,
+        )
+    else:
+        raise ValueError(f"Unsupported dataset case: {data.dataset}")
+
+    return dataloader
+
+
+def get_dataloader(trainer: DistributedTrainer) -> Dict[str, StatefulDataLoader]:
+    dataloaders = {}
+
+    for stage_idx, stage in enumerate(trainer.config.data_stages):
+        # NOTE: we only create the dataloader for the first stage,
+        # then we lazy initialize the dataloader for the other stages
+        stage = cast(DatasetStageArgs, stage)
+        
+        log_rank(
+            f"[Training Plan] Stage {stage.name}",
+            logger=logger,
+            level=logging.INFO,
+            rank=0,
+        )
+
+        dataloader = (
+            get_dataloader_from_data_stage(
+                trainer,
+                stage.data,
+            )
+            if stage_idx == 0
+            else lambda stage=stage: get_dataloader_from_data_stage(
+                trainer,
+                stage.data
+            )
+        )
+        dataloaders[stage.name] = dataloader
+    return dataloaders
+
+
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config-file", type=str, required=True, help="Path to the YAML or python config file")
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = get_args()
+    config_file = args.config_file
+
+    # Load trainer and data
+    trainer = DistributedTrainer(config_file)
+    dataloader = get_dataloader(trainer)
+
+    # Train
+    # trainer.train(dataloader)

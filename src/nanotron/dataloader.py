@@ -484,7 +484,7 @@ class DataCollatorForVQA:
                 "pixel_values": TensorPointer(group_rank=self.input_pp_rank),
             }
 
-        # Make sure we load only what's necessary, ie we only load a `input_ids` column.
+        # Make sure we load only what's necessary, ie we only load `input_ids` and `pixel_values` column.
         assert all(list(example.keys()) == ["input_ids", "pixel_values"] for example in examples)
 
         # TODO @nouamanetazi: Is it better to have examples as np.array or torch.Tensor?

@@ -108,10 +108,40 @@ class NanosetDatasetsArgs:
 
 
 @dataclass
+class ImageDatasetsArgs:
+    hf_dataset_name_or_type: str
+    hf_dataset_splits: Optional[Union[str, list]] = None
+    hf_dataset_config_name: Optional[str] = None
+    hf_dataset_data_dir: Optional[str] = None
+
+    sample_encoder: str
+    sample_encoder_args: Optional[dict] = None
+    batch_encoder: str
+    batch_encoder_args: Optional[dict] = None
+
+    processing_batch_size: int = 1000
+    
+    sample_encoding_workers: int
+    batch_encoding_workers: int
+
+    image_scale_factor: int
+    image_size: int
+
+    def __post_init__(self):
+        if self.hf_dataset_splits is None:
+            self.hf_dataset_splits = "train"
+        if self.image_size is None:
+            self.image_size = 364
+        if self.sample_encoder_args is None:
+            self.sample_encoder_args = {}
+        if self.batch_encoder_args is None:
+            self.batch_encoder_args = {}
+
+@dataclass
 class DataArgs:
     """Arguments related to the data and data files processing"""
 
-    dataset: Optional[Union[PretrainDatasetsArgs, NanosetDatasetsArgs]]
+    dataset: Optional[Union[PretrainDatasetsArgs, NanosetDatasetsArgs, ImageDatasetsArgs]]
     seed: Optional[int]
     num_loading_workers: Optional[int] = 1
 
