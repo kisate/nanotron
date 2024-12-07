@@ -171,10 +171,10 @@ class DistributedTrainer:
         self.random_states = init_random_states(
             parallel_config=self.config.parallelism, tp_pg=self.parallel_context.tp_pg
         )
-        # self.model = self.init_model()  # Defines self.model
-        # self.unwrapped_model: NanotronModel = (
-        #     self.model.module if isinstance(self.model, DistributedDataParallel) else self.model
-        # )
+        self.model = self.init_model()  # Defines self.model
+        self.unwrapped_model: NanotronModel = (
+            self.model.module if isinstance(self.model, DistributedDataParallel) else self.model
+        )
 
         # TODO: find a better way to handle this
         parametrization_method = (
@@ -184,12 +184,12 @@ class DistributedTrainer:
         )
 
         # Init optimizer
-        # self.optimizer, self.grad_accumulator = init_optimizer_and_grad_accumulator(
-        #     parametrization_method=parametrization_method,
-        #     model=self.model,
-        #     optimizer_args=self.config.optimizer,
-        #     parallel_context=self.parallel_context,
-        # )
+        self.optimizer, self.grad_accumulator = init_optimizer_and_grad_accumulator(
+            parametrization_method=parametrization_method,
+            model=self.model,
+            optimizer_args=self.config.optimizer,
+            parallel_context=self.parallel_context,
+        )
         # if self.init_checkpoint_path is not None:
         #     load_optimizer(
         #         optimizer=self.optimizer,
@@ -213,7 +213,7 @@ class DistributedTrainer:
         #     )
 
         # Define iteration start state
-        if self.init_checkpoint_path is not None:
+        if False:
             checkpoint_metadata = load_meta(
                 parallel_context=self.parallel_context, root_folder=self.init_checkpoint_path
             )
@@ -236,13 +236,13 @@ class DistributedTrainer:
             )
 
         # Setup tensorboard write and log writers on output rank
-        # self.logger_ranks = self.parallel_context.get_global_rank(
-        #     ep_rank=0, pp_rank=self.unwrapped_model.output_pp_rank, dp_rank=0, tp_rank=0
-        # ).flatten()
-        # self.loggerwriter = self.setup_log_writers()
+        self.logger_ranks = self.parallel_context.get_global_rank(
+            ep_rank=0, pp_rank=self.unwrapped_model.output_pp_rank, dp_rank=0, tp_rank=0
+        ).flatten()
+        self.loggerwriter = self.setup_log_writers()
 
         # Log where each module is instantiated
-        # self.unwrapped_model.log_modules(level=logging.DEBUG, group=self.parallel_context.world_pg, rank=0)
+        self.unwrapped_model.log_modules(level=logging.DEBUG, group=self.parallel_context.world_pg, rank=0)
 
         self.micro_batch_size = self.config.tokens.micro_batch_size
         self.n_micro_batches_per_batch = self.config.tokens.batch_accumulation_per_replica
@@ -671,7 +671,7 @@ class DistributedTrainer:
         log_rank("Model Config:\n" + pformat(self.model_config), logger=logger, level=logging.INFO, rank=0)
 
         model = self._init_model_instance()
-        model = self._load_model_checkpoint(model)
+        # model = self._load_model_checkpoint(model)
         return model
 
     def _init_model_instance(self) -> NanotronModel:

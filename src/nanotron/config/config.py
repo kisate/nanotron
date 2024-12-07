@@ -110,22 +110,20 @@ class NanosetDatasetsArgs:
 @dataclass
 class ImageDatasetsArgs:
     hf_dataset_name_or_type: str
+    sample_encoder: str
+    batch_encoder: str
+    sample_encoding_workers: int
+    batch_encoding_workers: int
+    image_scale_factor: int
+
+    image_size: int = 364
+    processing_batch_size: int = 1000
     hf_dataset_splits: Optional[Union[str, list]] = None
     hf_dataset_config_name: Optional[str] = None
     hf_dataset_data_dir: Optional[str] = None
 
-    sample_encoder: str
     sample_encoder_args: Optional[dict] = None
-    batch_encoder: str
     batch_encoder_args: Optional[dict] = None
-
-    processing_batch_size: int = 1000
-    
-    sample_encoding_workers: int
-    batch_encoding_workers: int
-
-    image_scale_factor: int
-    image_size: int
 
     def __post_init__(self):
         if self.hf_dataset_splits is None:

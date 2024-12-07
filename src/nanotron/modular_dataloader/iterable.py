@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Optional
 from datasets import IterableDataset
 from nanotron.parallel.context import ParallelContext
 from nanotron import distributed as dist
-from nanotron.modular_dataloader.base import SampleEncoder, BatchEncoder, T_encoded_sample, T_raw_batch, T_batch, T_sample
+from nanotron.modular_dataloader.base import SampleEncoder, BatchEncoder, T_encoded_sample
 from multiprocessing.pool import ThreadPool
 from torchdata.stateful_dataloader import StatefulDataLoader
 from datasets.distributed import split_dataset_by_node  

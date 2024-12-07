@@ -93,7 +93,6 @@ def get_dataloader_from_data_stage(
             batch_encoder=batch_encoder,
             parallel_context=trainer.parallel_context,
             sequence_length=trainer.sequence_length,
-            parallel_context=trainer.parallel_context,
             input_pp_rank=input_pp_rank,
             output_pp_rank=output_pp_rank,
             micro_batch_size=trainer.micro_batch_size,
