@@ -66,8 +66,8 @@ def get_dataloader_from_data_stage(
             data.dataset.hf_dataset_name_or_type,
             data_dir=data.dataset.hf_dataset_data_dir,
             split=data.dataset.hf_dataset_splits,
-            streaming=True,
-        )["train"]
+            streaming=True
+        )
 
         processor = AutoProcessor.from_pretrained(
             tokenizer_path,
@@ -92,11 +92,11 @@ def get_dataloader_from_data_stage(
             sample_encoder=sample_encoder,
             batch_encoder=batch_encoder,
             parallel_context=trainer.parallel_context,
-            sequence_length=trainer.sequence_length,
             input_pp_rank=input_pp_rank,
             output_pp_rank=output_pp_rank,
             micro_batch_size=trainer.micro_batch_size,
-            processing_batch_size=data.dataset.processing_batch_size,
+            sample_encoding_batch=data.dataset.sample_encoding_batch,
+            batch_encoding_batch=data.dataset.batch_encoding_batch,
             seed_worker=data.seed,
             sample_encoding_workers=data.dataset.sample_encoding_workers,
             batch_encoding_workers=data.dataset.batch_encoding_workers,
@@ -152,6 +152,21 @@ if __name__ == "__main__":
     # Load trainer and data
     trainer = DistributedTrainer(config_file)
     dataloader = get_dataloader(trainer)
+
+    import time
+    start = time.time()
+    c = 0
+
+    all_times = []
+
+    for i in dataloader['Stable Training Stage']:
+        c += 1
+        end = time.time()
+        all_times.append(end - start)
+        print(f"{c} Time: {end - start}, Average: {sum(all_times) / len(all_times)}")
+        start = end
+        if c == 100:
+            break
 
     # Train
     # trainer.train(dataloader)

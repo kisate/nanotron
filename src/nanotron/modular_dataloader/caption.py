@@ -41,6 +41,8 @@ def byte_img_to_array(bimg):
     imageStream = io.BytesIO(bimg)
     imageFile = Image.open(imageStream)
     img_arr = np.array(imageFile)
+    if len(img_arr.shape) == 2:  # Grayscale image
+        img_arr = np.expand_dims(img_arr, axis=-1)  # Add a channel dimension
     # imageFile.show()
     return img_arr
 

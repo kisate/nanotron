@@ -117,7 +117,8 @@ class ImageDatasetsArgs:
     image_scale_factor: int
 
     image_size: int = 364
-    processing_batch_size: int = 1000
+    sample_encoding_batch: int = 1000
+    batch_encoding_batch: int = 1000
     hf_dataset_splits: Optional[Union[str, list]] = None
     hf_dataset_config_name: Optional[str] = None
     hf_dataset_data_dir: Optional[str] = None

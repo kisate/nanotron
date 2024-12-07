@@ -1,7 +1,7 @@
 from .caption import CaptionSampleEncoder, SingleImageBatchEncoder
 
 SAMPLE_ENCODERS = {
-    "caption": CaptionSampleEncoder,
+    "caption_simple": CaptionSampleEncoder,
 }
 
 BATCH_ENCODERS = {
