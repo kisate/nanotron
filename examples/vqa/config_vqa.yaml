@@ -116,8 +116,8 @@ optimizer:
 parallelism:
   dp: 1
   expert_parallel_size: 1
-  pp: 2
-  pp_engine: 1f1b
+  pp: 4
+  pp_engine: afab
   tp: 1
   tp_linear_async_communication: true
   tp_mode: REDUCE_SCATTER

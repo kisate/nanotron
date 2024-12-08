@@ -80,7 +80,7 @@ def get_train_dataloader(
             empty_dataset,
             batch_size=1,
             num_workers=0,
-            collate_fn=lambda x: x,
+            collate_fn=lambda x: x[0],
         )
     
     train_dataset = split_dataset_by_node(train_dataset, rank=parallel_context.dp_pg.rank(), world_size=parallel_context.dp_pg.size())

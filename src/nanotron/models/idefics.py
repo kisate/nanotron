@@ -218,7 +218,7 @@ class VisionSelfAttention(nn.Module, AttachableStore):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        image_hidden_states: torch.Tensor,
         sequence_mask
     ):
         from flash_attn import bert_padding
@@ -227,7 +227,7 @@ class VisionSelfAttention(nn.Module, AttachableStore):
             flash_attn_with_kvcache,
         )
 
-        hidden_states = hidden_states
+        hidden_states = image_hidden_states
 
         qkv_states = self.qkv_proj(
             hidden_states
@@ -290,7 +290,7 @@ class VisionSelfAttention(nn.Module, AttachableStore):
 
         output = self.o_proj(attention_output)
 
-        return {"hidden_states": output, "sequence_mask": sequence_mask}
+        return {"image_hidden_states": output, "sequence_mask": sequence_mask}
     
 
 class VisionMLP(nn.Module):
@@ -331,10 +331,10 @@ class VisionMLP(nn.Module):
         )
         self.act = torch.compile(lambda x: nn.functional.gelu(x, approximate="tanh"))
 
-    def forward(self, hidden_states):  # [seq_length, batch_size, hidden_dim]
-        merged_states = self.fc1(hidden_states)
-        hidden_states = self.fc2(self.act(merged_states))
-        return {"hidden_states": hidden_states}
+    def forward(self, image_hidden_states):  # [seq_length, batch_size, hidden_dim]
+        merged_states = self.fc1(image_hidden_states)
+        image_hidden_states = self.fc2(self.act(merged_states))
+        return {"image_hidden_states": image_hidden_states}
     
 
 
@@ -378,26 +378,28 @@ class VisionEncoderLayer(nn.Module):
 
     def forward(
         self,
-        hidden_states: Union[torch.Tensor, TensorPointer],
+        image_hidden_states: Union[torch.Tensor, TensorPointer],
         sequence_mask: Union[torch.Tensor, TensorPointer],
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
         
+        hidden_states = image_hidden_states
+
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
         output = self.self_attn(hidden_states=hidden_states, sequence_mask=sequence_mask)
-        hidden_states = output["hidden_states"]
+        hidden_states = output["image_hidden_states"]
 
         hidden_states = hidden_states + residual
 
         residual = hidden_states
 
         hidden_states = self.layer_norm2(hidden_states)
-        hidden_states = self.mlp(hidden_states=hidden_states)["hidden_states"]
+        hidden_states = self.mlp(hidden_states=hidden_states)["image_hidden_states"]
         hidden_states = hidden_states + residual
 
         return {
-            "hidden_states": hidden_states,
+            "image_hidden_states": hidden_states,
             "sequence_mask": output["sequence_mask"],
         }
     
@@ -485,7 +487,7 @@ class VisionTransformer(nn.Module):
 
             patch_attention_mask = patch_attention_mask.to(pixel_values.device, dtype=torch.bool)
 
-        hidden_states = self.embeddings(
+        image_hidden_states = self.embeddings(
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
         )["embeddings"]
@@ -493,17 +495,17 @@ class VisionTransformer(nn.Module):
         patch_attention_mask = patch_attention_mask.view(batch_size, -1)
 
         hidden_encoder_states = {
-            "hidden_states": hidden_states,
+            "image_hidden_states": image_hidden_states,
             "sequence_mask": patch_attention_mask,
         }
 
         for i, encoder_layer in enumerate(self.encoder):
             hidden_encoder_states = encoder_layer(**hidden_encoder_states)
 
-        hidden_states = hidden_encoder_states["hidden_states"]
-        hidden_states = self.post_layernorm(input=hidden_states)
+        image_hidden_states = hidden_encoder_states["image_hidden_states"]
+        image_hidden_states = self.post_layernorm(input=image_hidden_states)
 
-        return hidden_states
+        return image_hidden_states
 
 
 class Idefics3MLP(nn.Module):
@@ -545,10 +547,10 @@ class Idefics3MLP(nn.Module):
         )
         self.split_silu_mul = torch.compile(GLUActivation(config.hidden_act))
 
-    def forward(self, hidden_states):  # [seq_length, batch_size, hidden_dim]
-        merged_states = self.gate_up_proj(hidden_states)
-        hidden_states = self.down_proj(self.split_silu_mul(merged_states))
-        return {"hidden_states": hidden_states}
+    def forward(self, image_hidden_states):  # [seq_length, batch_size, hidden_dim]
+        merged_states = self.gate_up_proj(image_hidden_states)
+        image_hidden_states = self.down_proj(self.split_silu_mul(merged_states))
+        return {"image_hidden_states": image_hidden_states}
     
 class Idefics3SimpleMLP(nn.Module):
     def __init__(
@@ -575,9 +577,9 @@ class Idefics3SimpleMLP(nn.Module):
             bias = False
         )
 
-    def forward(self, hidden_states):
-        hidden_states = self.proj(hidden_states)
-        return {"hidden_states": hidden_states}
+    def forward(self, image_hidden_states):
+        image_hidden_states = self.proj(image_hidden_states)
+        return {"image_hidden_states": image_hidden_states}
     
 
 class Idefics3Connector(nn.Module):
@@ -607,10 +609,10 @@ class Idefics3Connector(nn.Module):
         x = x.reshape(bsz, int(seq / (scale_factor**2)), embed_dim * (scale_factor**2))
         return x
     
-    def forward(self, hidden_states):
-        hidden_states = self.pixel_shuffle(hidden_states, self.scale_factor)
-        hidden_states = self.modality_projector(hidden_states=hidden_states)["hidden_states"]
-        return {"hidden_states": hidden_states}
+    def forward(self, image_hidden_states):
+        image_hidden_states = self.pixel_shuffle(image_hidden_states, self.scale_factor)
+        image_hidden_states = self.modality_projector(image_hidden_states=image_hidden_states)["hiddeimage_hidden_statesn_states"]
+        return {"image_hidden_states": image_hidden_states}
 
 class InputsMerger(nn.Module):
     def __init__(
@@ -660,6 +662,8 @@ class InputsMerger(nn.Module):
         else:
             raise ValueError(f"Got unexpected mode: {self.tp_mode}.") 
 
+        print(f"!!!!?!??!?!?: {new_inputs_embeds.shape}")
+
         return {"new_inputs_embeds": new_inputs_embeds}
 
 class Idefics3Model(nn.Module):
@@ -703,7 +707,7 @@ class Idefics3Model(nn.Module):
                 "pixel_values",
             },
             module_output_keys={
-                "hidden_states"
+                "image_hidden_states"
             }
         )
 
@@ -716,10 +720,10 @@ class Idefics3Model(nn.Module):
                 "tp_pg": tp_pg,
             },
             module_input_keys={
-                "hidden_states"
+                "image_hidden_states"
             },
             module_output_keys={
-                "hidden_states"
+                "image_hidden_states"
             }
         )
 
@@ -779,11 +783,11 @@ class Idefics3Model(nn.Module):
         # Get sequence from the vision encoder
         image_hidden_states = self.vision_model(
             pixel_values=pixel_values,
-        )["hidden_states"]
+        )["image_hidden_states"]
 
         # Modality projection & resampling
         image_hidden_states = self.connector(
-            hidden_states=image_hidden_states
+            image_hidden_states=image_hidden_states
         )
 
         inputs_embeds = self.llama.token_position_embeddings(input_ids=input_ids, input_mask=input_mask)["input_embeds"]
@@ -791,7 +795,7 @@ class Idefics3Model(nn.Module):
         inputs_embeds = self.inputs_merger(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
-            image_hidden_states=image_hidden_states["hidden_states"],
+            image_hidden_states=image_hidden_states["image_hidden_states"],
         )["new_inputs_embeds"]
 
         outputs = self.llama.forward_with_hidden_states(
