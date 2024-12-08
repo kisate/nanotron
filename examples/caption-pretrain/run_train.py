@@ -75,6 +75,8 @@ def get_dataloader_from_data_stage(
         ) 
 
         sample_encoder = SAMPLE_ENCODERS[data.dataset.sample_encoder](
+            processor=processor,
+            sequence_length=trainer.sequence_length,
             **data.dataset.sample_encoder_args
         )
 
@@ -159,14 +161,14 @@ if __name__ == "__main__":
 
     all_times = []
 
-    for i in dataloader['Stable Training Stage']:
-        c += 1
-        end = time.time()
-        all_times.append(end - start)
-        print(f"{c} Time: {end - start}, Average: {sum(all_times) / len(all_times)}")
-        start = end
-        if c == 100:
-            break
+    # for i in dataloader['Stable Training Stage']:
+        # c += 1
+        # end = time.time()
+        # all_times.append(end - start)
+        # print(f"{c} Time: {end - start}, Average: {sum(all_times) / len(all_times)}")
+        # start = end
+        # if c == 100:
+        #     break
 
     # Train
-    # trainer.train(dataloader)
+    trainer.train(dataloader)

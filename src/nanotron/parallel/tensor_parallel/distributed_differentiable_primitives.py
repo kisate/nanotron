@@ -162,6 +162,42 @@ class DifferetiableScatter(torch.autograd.Function):
     def backward(ctx, grad_output):
         group = ctx.group
         return DifferentiableAllGather.apply(grad_output, group), None
+    
+
+class DifferentiableReduceScatterAvg(torch.autograd.Function):
+    """Reduce scatter in a differentiable fashion"""
+
+    @staticmethod
+    def forward(ctx, tensor, group: Optional[ProcessGroup]):
+        ctx.group = group
+
+        if group.size() == 1:
+            return tensor
+
+        # TODO @thomasw21: shard along another dimension
+        unsharded_batch_size, *rest_size = tensor.shape
+        if group is None:
+            group = torch_dist.distributed_c10d._get_default_group()
+        assert unsharded_batch_size % group.size() == 0
+
+        # TODO @thomasw21: Collectives seem to require tensors to be contiguous
+        # https://cs.github.com/pytorch/pytorch/blob/2b267fa7f28e18ca6ea1de4201d2541a40411457/torch/distributed/nn/functional.py#L305
+        tensor = tensor.contiguous()
+
+        sharded_tensor = torch.empty(
+            unsharded_batch_size // group.size(),
+            *rest_size,
+            device=tensor.device,
+            dtype=tensor.dtype,
+            requires_grad=False,
+        )
+        dist.reduce_scatter_tensor(sharded_tensor, tensor, group=group, op=dist.ReduceOp.AVG)
+        return sharded_tensor
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        group = ctx.group
+        return DifferentiableAllGather.apply(grad_output, group), None
 
 
 # -----------------
@@ -185,4 +221,4 @@ def differentiable_reduce_scatter_sum(tensor, group: Optional[ProcessGroup] = No
     return DifferentiableReduceScatterSum.apply(tensor, group)
 
 def differentiable_scatter(tensor, group: Optional[ProcessGroup] = None):
-    return DifferetiableScatter.apply(tensor, group)
+    return DifferentiableReduceScatterAvg.apply(tensor, group)

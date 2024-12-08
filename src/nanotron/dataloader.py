@@ -487,7 +487,6 @@ class DataCollatorForVQA:
         # Make sure we load only what's necessary, ie we only load `input_ids` and `pixel_values` column.
         assert all(list(example.keys()) == ["input_ids", "pixel_values"] for example in examples)
 
-        # TODO @nouamanetazi: Is it better to have examples as np.array or torch.Tensor?
         max_n_patches = max([len(examples[i]["pixel_values"][0]) for i in range(len(examples))])
 
         padded_pixel_values = []
@@ -496,7 +495,7 @@ class DataCollatorForVQA:
             pixel_values = example["pixel_values"]
             current_patches = len(pixel_values[0])
             
-            # Pad the pixel_values to have max_n_patches along dimension 1 (channels)
+            # Pad the pixel_values to have max_n_patches along dimension 1 (patches)
             padding = ((0, 0), (0, max_n_patches - current_patches), (0, 0), (0, 0), (0, 0))  # Only pad the patches dimension
             padded_values = np.pad(pixel_values, pad_width=padding, mode='constant', constant_values=0)
             padded_pixel_values.append(padded_values)

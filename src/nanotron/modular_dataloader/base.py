@@ -16,6 +16,9 @@ class SampleEncoder(ABC, Generic[T_encoded_sample]):
     Processes a single sample. E.g. formats caption text.
     """
 
+    processor: AutoProcessor
+    sequence_length: int
+
     def encode(self, sample: Dict[str, Any]) -> T_encoded_sample:
         """
         Encode a sample.

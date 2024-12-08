@@ -190,30 +190,30 @@ class DistributedTrainer:
             optimizer_args=self.config.optimizer,
             parallel_context=self.parallel_context,
         )
-        # if self.init_checkpoint_path is not None:
-        #     load_optimizer(
-        #         optimizer=self.optimizer,
-        #         parallel_context=self.parallel_context,
-        #         root_folder=self.init_checkpoint_path,
-        #         param_shard_metadata=self.param_shard_metadata,
-        #         model=self.model,
-        #     )
+        if self.init_checkpoint_path is not None:
+            load_optimizer(
+                optimizer=self.optimizer,
+                parallel_context=self.parallel_context,
+                root_folder=self.init_checkpoint_path,
+                param_shard_metadata=self.param_shard_metadata,
+                model=self.model,
+            )
 
         # Init learning rate scheduler
-        # self.lr_scheduler = lr_scheduler_builder(
-        #     optimizer=self.optimizer,
-        #     lr_scheduler_args=self.config.optimizer.learning_rate_scheduler,
-        #     total_training_steps=self.config.tokens.train_steps,
-        # )
-        # if self.init_checkpoint_path is not None:
-        #     load_lr_scheduler(
-        #         lr_scheduler=self.lr_scheduler,
-        #         parallel_context=self.parallel_context,
-        #         root_folder=self.init_checkpoint_path,
-        #     )
+        self.lr_scheduler = lr_scheduler_builder(
+            optimizer=self.optimizer,
+            lr_scheduler_args=self.config.optimizer.learning_rate_scheduler,
+            total_training_steps=self.config.tokens.train_steps,
+        )
+        if self.init_checkpoint_path is not None:
+            load_lr_scheduler(
+                lr_scheduler=self.lr_scheduler,
+                parallel_context=self.parallel_context,
+                root_folder=self.init_checkpoint_path,
+            )
 
         # Define iteration start state
-        if False:
+        if self.init_checkpoint_path is not None:
             checkpoint_metadata = load_meta(
                 parallel_context=self.parallel_context, root_folder=self.init_checkpoint_path
             )
@@ -671,7 +671,7 @@ class DistributedTrainer:
         log_rank("Model Config:\n" + pformat(self.model_config), logger=logger, level=logging.INFO, rank=0)
 
         model = self._init_model_instance()
-        # model = self._load_model_checkpoint(model)
+        model = self._load_model_checkpoint(model)
         return model
 
     def _init_model_instance(self) -> NanotronModel:

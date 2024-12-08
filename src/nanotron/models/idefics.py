@@ -415,66 +415,63 @@ class VisionTransformer(nn.Module):
         self.p2p = p2p
         self.tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
 
-        self.embeddings = PipelineBlock(
-            p2p=self.p2p,
-            module_builder=VisionEmbedding,
-            module_kwargs={
-                "config": config,
-                "parallel_config": parallel_config,
-                "tp_pg": parallel_context.tp_pg,
-            },
-            module_input_keys={
-                "pixel_values",
-                "patch_attention_mask"
-            },
-            module_output_keys={
-                "embeddings"
-            }
+        self.embeddings = VisionEmbedding(
+            tp_pg=parallel_context.tp_pg,
+            config=config,
+            parallel_config=parallel_config,
         )
 
         self.encoder = nn.ModuleList(
             [
-                PipelineBlock(
-                    p2p=self.p2p,
-                    module_builder=VisionEncoderLayer,
-                    module_kwargs={
-                        "config": config,
-                        "parallel_config": parallel_config,
-                        "tp_pg": parallel_context.tp_pg,
-                        "layer_id": i,
-                    },
-                    module_input_keys={
-                        "hidden_states",
-                        "sequence_mask",
-                    },
-                    module_output_keys={
-                        "hidden_states",
-                        "sequence_mask"
-                    }
+                VisionEncoderLayer(
+                    config=config,
+                    parallel_config=parallel_config,
+                    tp_pg=parallel_context.tp_pg,
+                    layer_id=i,
                 )
-
                 for i in range(config.num_hidden_layers)
             ]
         )
 
-        self.post_layernorm = PipelineBlock(
-            p2p=self.p2p,
-            module_builder=TritonLayerNorm,
-            module_kwargs={"normalized_shape": config.hidden_size, "eps": config.layer_norm_eps},
-            module_input_keys={
-                "input"
-            },
-            module_output_keys={
-                "hidden_states"
-            }
+        self.post_layernorm = TritonLayerNorm(
+            normalized_shape=config.hidden_size,
+            eps=config.layer_norm_eps,
         )
 
     def forward(
         self,
         pixel_values: Union[torch.Tensor, TensorPointer],
-        patch_attention_mask: Union[torch.Tensor, TensorPointer] = None,
+        pixel_attention_mask: Union[torch.Tensor, TensorPointer] = None,
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
         batch_size = pixel_values.size(0)
+
+        batch_size, num_images, num_channels, height, width = pixel_values.size()
+
+        pixel_values = pixel_values.view(batch_size * num_images, num_channels, height, width)
+
+        nb_values_per_image = pixel_values.shape[1:].numel()
+        real_images_inds = (pixel_values == 0.0).sum(dim=(-1, -2, -3)) != nb_values_per_image
+        pixel_values = pixel_values[real_images_inds].contiguous()
+
+        if pixel_attention_mask is None:
+            pixel_attention_mask = torch.ones(
+                size=(pixel_values.size(0), pixel_values.size(2), pixel_values.size(3)),
+                dtype=torch.bool,
+                device=pixel_values.device,
+                )
+        else:
+            # Remove padding images from the mask/pP p
+            pixel_attention_mask = pixel_attention_mask.view(
+                batch_size * num_images, *pixel_attention_mask.shape[2:]
+            )
+            pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
+
+        patch_size = self.config.patch_size
+        patches_subgrid = pixel_attention_mask.unfold(dimension=1, size=patch_size, step=patch_size)
+        patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
+        patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) == patch_size * patch_size).bool()
+
+        pixel_values = pixel_values.bfloat16()
 
         if patch_attention_mask is None:
             patch_size = self.config.patch_size
@@ -507,16 +504,6 @@ class VisionTransformer(nn.Module):
         hidden_states = self.post_layernorm(input=hidden_states)
 
         return hidden_states
-    
-    def get_block_compute_costs(self):
-        config = self.config
-        d_ff = config.intermediate_size
-        d_qkv = config.hidden_size // config.num_attention_heads
-
-        return {
-            VisionEncoderLayer: 4 * config.num_attention_heads * d_qkv * config.hidden_size
-            + 3 * d_ff * config.hidden_size
-        }
 
 
 class Idefics3MLP(nn.Module):
@@ -598,25 +585,14 @@ class Idefics3Connector(nn.Module):
         self,
         config: Idefics3Config,
         parallel_config: Optional[ParallelismArgs],
-        tp_pg: dist.ProcessGroup,
-        p2p
+        tp_pg: dist.ProcessGroup
     ):
         super().__init__()
         self.scale_factor = config.scale_factor
-        self.modality_projector = PipelineBlock(
-            p2p=p2p,
-            module_builder=Idefics3SimpleMLP,
-            module_kwargs={
-                "config": config,
-                "parallel_config": parallel_config,
-                "tp_pg": tp_pg,
-            },
-            module_input_keys={
-                "hidden_states"
-            },
-            module_output_keys={
-                "hidden_states"
-            }
+        self.modality_projector = Idefics3SimpleMLP(
+            config=config,
+            parallel_config=parallel_config,
+            tp_pg=tp_pg,
         )
 
     def pixel_shuffle(self, x, scale_factor=2):
@@ -636,20 +612,70 @@ class Idefics3Connector(nn.Module):
         hidden_states = self.modality_projector(hidden_states=hidden_states)["hidden_states"]
         return {"hidden_states": hidden_states}
 
+class InputsMerger(nn.Module):
+    def __init__(
+        self, 
+        config: Idefics3Config,
+        parallel_config: Optional[ParallelismArgs],
+        tp_pg: dist.ProcessGroup            
+    ):
+        super().__init__()
+        self.tp_pg = tp_pg
+        self.tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
+        
+        self.image_token_id = config.image_token_id
+
+    def forward(
+        self,
+        input_ids: Union[torch.Tensor, TensorPointer],
+        inputs_embeds: Union[torch.Tensor, TensorPointer],
+        image_hidden_states: Union[torch.Tensor, TensorPointer],
+    ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
+        
+        # Llama's embedding may leave them scattered
+
+        if self.tp_mode is TensorParallelLinearMode.ALL_REDUCE:
+            inputs_embeds = differentiable_identity(inputs_embeds, group=self.tp_pg)
+        elif self.tp_mode is TensorParallelLinearMode.REDUCE_SCATTER:
+            inputs_embeds = differentiable_all_gather(inputs_embeds, group=self.tp_pg)
+        else:
+            raise ValueError(f"Got unexpected mode: {self.tp_mode}.")
+        
+        # Llama's embedding swaps batch and seq_length
+
+        inputs_embeds = inputs_embeds.transpose(0, 1)
+
+        num_images, _, vision_hidden_size = image_hidden_states.shape
+        special_image_token_mask = input_ids == self.image_token_id
+        new_inputs_embeds = inputs_embeds.clone()
+        reshaped_image_hidden_states = image_hidden_states.view(-1, vision_hidden_size)
+        new_inputs_embeds[special_image_token_mask] = reshaped_image_hidden_states
+
+        new_inputs_embeds = new_inputs_embeds.transpose(0, 1)
+
+        if self.tp_mode is TensorParallelLinearMode.ALL_REDUCE:
+            new_inputs_embeds = differentiable_identity(new_inputs_embeds, group=self.tp_pg)
+        elif self.tp_mode is TensorParallelLinearMode.REDUCE_SCATTER:
+            new_inputs_embeds = differentiable_scatter(new_inputs_embeds, group=self.tp_pg)
+        else:
+            raise ValueError(f"Got unexpected mode: {self.tp_mode}.") 
+
+        return {"new_inputs_embeds": new_inputs_embeds}
+
 class Idefics3Model(nn.Module):
     def __init__(
         self,
         config: Idefics3Config,
         parallel_context: ParallelContext,
         parallel_config: Optional[ParallelismArgs],
-        tp_gp: dist.ProcessGroup,
+        tp_pg: dist.ProcessGroup,
     ):
         super().__init__()
 
         self.config = config
         self.image_token_id = config.image_token_id
         self.tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
-        self.tp_gp = tp_gp
+        self.tp_pg = tp_pg
         tp_linear_async_communication = (
             parallel_config.tp_linear_async_communication if parallel_config is not None else False
         )
@@ -659,22 +685,65 @@ class Idefics3Model(nn.Module):
             parallel_context=parallel_context,
             parallel_config=parallel_config,
         )
+
+        p2p = self.llama.p2p
         
         del self.llama.lm_head
         
-        self.vision_model = VisionTransformer(
-            config=config.vision_config,
-            p2p=self.llama.p2p,
-            parallel_context=parallel_context,
-            parallel_config=parallel_config,
+        self.vision_model = PipelineBlock(
+            p2p=p2p,
+            module_builder=VisionTransformer,
+            module_kwargs={
+                "config": config.vision_config,
+                "p2p": p2p,
+                "parallel_context": parallel_context,
+                "parallel_config": parallel_config,
+            },
+            module_input_keys={
+                "pixel_values",
+            },
+            module_output_keys={
+                "hidden_states"
+            }
         )
 
-        self.connector = Idefics3Connector(
-            config, parallel_config, parallel_context.tp_pg, self.llama.p2p
+        self.connector = PipelineBlock(
+            p2p=p2p,
+            module_builder=Idefics3Connector,
+            module_kwargs={
+                "config": config,
+                "parallel_config": parallel_config,
+                "tp_pg": tp_pg,
+            },
+            module_input_keys={
+                "hidden_states"
+            },
+            module_output_keys={
+                "hidden_states"
+            }
         )
+
+        self.inputs_merger = PipelineBlock(
+            p2p=p2p,
+            module_builder=InputsMerger,
+            module_kwargs={
+                "config": config,
+                "parallel_config": parallel_config,
+                "tp_pg": tp_pg,
+            },
+            module_input_keys={
+                "input_ids",
+                "inputs_embeds",
+                "image_hidden_states",
+            },
+            module_output_keys={
+                "new_inputs_embeds"
+            }
+        )
+
 
         self.lm_head = PipelineBlock(
-            p2p=self.llama.p2p,
+            p2p=p2p,
             # Understand that this means that we return sharded logits that are going to need to be gathered
             module_builder=TensorParallelColumnLinear,
             module_kwargs={
@@ -700,19 +769,6 @@ class Idefics3Model(nn.Module):
             module_output_keys={"output"},
         )
         
-    def inputs_merger(
-            self,
-            input_ids: Union[torch.Tensor, TensorPointer],
-            inputs_embeds: Union[torch.Tensor, TensorPointer],
-            image_hidden_states: Union[torch.Tensor, TensorPointer],
-    ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
-        num_images, _, vision_hidden_size = image_hidden_states.shape
-        special_image_token_mask = input_ids == self.image_token_id
-        new_inputs_embeds = inputs_embeds.clone()
-        reshaped_image_hidden_states = image_hidden_states.view(-1, vision_hidden_size)
-        new_inputs_embeds[special_image_token_mask] = reshaped_image_hidden_states
-        return new_inputs_embeds
-
     def forward_with_hidden_states(
         self,
         input_ids: Union[torch.Tensor, TensorPointer],
@@ -720,38 +776,9 @@ class Idefics3Model(nn.Module):
         pixel_values: Union[torch.Tensor, TensorPointer] = None,
         pixel_attention_mask: Union[torch.Tensor, TensorPointer] = None,
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
-        batch_size, num_images, num_channels, height, width = pixel_values.size()
-
-        pixel_values = pixel_values.view(batch_size * num_images, num_channels, height, width)
-
-        nb_values_per_image = pixel_values.shape[1:].numel()
-        real_images_inds = (pixel_values == 0.0).sum(dim=(-1, -2, -3)) != nb_values_per_image
-        pixel_values = pixel_values[real_images_inds].contiguous()
-
-        if pixel_attention_mask is None:
-            pixel_attention_mask = torch.ones(
-                size=(pixel_values.size(0), pixel_values.size(2), pixel_values.size(3)),
-                dtype=torch.bool,
-                device=pixel_values.device,
-                )
-        else:
-            # Remove padding images from the mask/pP p
-            pixel_attention_mask = pixel_attention_mask.view(
-                batch_size * num_images, *pixel_attention_mask.shape[2:]
-            )
-            pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
-
-        patch_size = self.config.vision_config.patch_size
-        patches_subgrid = pixel_attention_mask.unfold(dimension=1, size=patch_size, step=patch_size)
-        patches_subgrid = patches_subgrid.unfold(dimension=2, size=patch_size, step=patch_size)
-        patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) == patch_size * patch_size).bool()
-
-        pixel_values = pixel_values.bfloat16()
-
         # Get sequence from the vision encoder
         image_hidden_states = self.vision_model(
             pixel_values=pixel_values,
-            patch_attention_mask=patch_attention_mask,
         )["hidden_states"]
 
         # Modality projection & resampling
@@ -761,29 +788,12 @@ class Idefics3Model(nn.Module):
 
         inputs_embeds = self.llama.token_position_embeddings(input_ids=input_ids, input_mask=input_mask)["input_embeds"]
 
-        if self.tp_mode is TensorParallelLinearMode.ALL_REDUCE:
-            inputs_embeds = differentiable_identity(inputs_embeds, group=self.tp_gp)
-        elif self.tp_mode is TensorParallelLinearMode.REDUCE_SCATTER:
-            inputs_embeds = differentiable_all_gather(inputs_embeds, group=self.tp_gp)
-        else:
-            raise ValueError(f"Got unexpected mode: {self.tp_mode}.")
-
         inputs_embeds = self.inputs_merger(
             input_ids=input_ids,
-            inputs_embeds=inputs_embeds.transpose(0, 1),
+            inputs_embeds=inputs_embeds,
             image_hidden_states=image_hidden_states["hidden_states"],
-        )
+        )["new_inputs_embeds"]
 
-        inputs_embeds = inputs_embeds.transpose(0, 1)
-        input_mask=input_mask.transpose(0, 1)
-
-        if self.tp_mode is TensorParallelLinearMode.ALL_REDUCE:
-            inputs_embeds = differentiable_identity(inputs_embeds, group=self.tp_gp)
-        elif self.tp_mode is TensorParallelLinearMode.REDUCE_SCATTER:
-            inputs_embeds = differentiable_scatter(inputs_embeds, group=self.tp_gp)
-        else:
-            raise ValueError(f"Got unexpected mode: {self.tp_mode}.") 
-        
         outputs = self.llama.forward_with_hidden_states(
             input_ids=None,
             input_embeds=inputs_embeds,
@@ -810,9 +820,19 @@ class Idefics3Model(nn.Module):
             input_ids=input_ids, input_mask=input_mask, pixel_values=pixel_values, pixel_attention_mask=pixel_attention_mask
         )[0]
     
+    def get_block_compute_costs_vision(self):
+        config = self.config.vision_config
+        d_ff = config.intermediate_size
+        d_qkv = config.hidden_size // config.num_attention_heads
+
+        return {
+            VisionTransformer: 4 * config.num_attention_heads * d_qkv * config.hidden_size
+            + 3 * d_ff * config.hidden_size * config.num_hidden_layers
+        }
+    
     def get_block_compute_costs(self):
         llama_cost = self.llama.get_block_compute_costs()
-        vision_cost = self.vision_model.get_block_compute_costs()
+        vision_cost = self.get_block_compute_costs_vision()
 
         return {**llama_cost, **vision_cost}
     
@@ -831,7 +851,7 @@ class Idefics3ForTraining(NanotronModel):
             config=config,
             parallel_context=parallel_context,
             parallel_config=parallel_config,
-            tp_gp=parallel_context.tp_pg
+            tp_pg=parallel_context.tp_pg
         )
 
         self.loss = PipelineBlock(
