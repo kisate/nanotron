@@ -4,7 +4,7 @@ from torch import nn
 
 from nanotron import logging
 from nanotron.config.config import Config
-from nanotron.config.models_config import RandomInit, SpectralMupInit
+from nanotron.config.models_config import LlamaConfig, RandomInit, SpectralMupInit
 from nanotron.config.parallelism_config import ParallelismArgs
 from nanotron.logging import log_rank
 from nanotron.models.base import NanotronModel
@@ -23,12 +23,41 @@ from nanotron.generation.generate_store import AttachableStore
 from nanotron.random import RandomStates, branch_random_state
 from nanotron.scaling.parametrization import SpectralMupParametrizator, StandardParametrizator
 from nanotron.utils import checkpoint_method
-from nanotron.models.llama import GLUActivation, LlamaModel, pad_to_right
+from nanotron.models.llama import GLUActivation, LlamaModel
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from nanotron.parallel.tensor_parallel.functional import sharded_cross_entropy
 
 
 logger = logging.get_logger(__name__)
+
+class LlamaEmbeddings(nn.Module, AttachableStore):
+    def __init__(self, tp_pg: dist.ProcessGroup, config: LlamaConfig, parallel_config: Optional[ParallelismArgs]):
+        super().__init__()
+        self.token_embedding = TensorParallelEmbedding(
+            num_embeddings=config.vocab_size,
+            embedding_dim=config.hidden_size,
+            padding_idx=config.pad_token_id,
+            pg=tp_pg,
+            mode=parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE,
+        )
+        self.pg = tp_pg
+
+    def forward(self, input_ids: torch.Tensor, input_mask: torch.Tensor):  # [batch_size, seq_length]
+        store = self.get_local_store()
+        if store is not None:
+            if "past_length" in store:
+                past_length = store["past_length"]
+            else:
+                past_length = torch.zeros(1, dtype=torch.long, device=input_ids.device).expand(input_ids.shape[0])
+
+            cumsum_mask = input_mask.cumsum(-1, dtype=torch.long)
+            # Store new past_length in store
+            store["past_length"] = past_length + cumsum_mask[:, -1]
+
+        # Format input in `[seq_length, batch_size]` to support high TP with low batch_size
+        input_ids = input_ids.transpose(0, 1)
+        input_embeds = self.token_embedding(input_ids)
+        return {"input_embeds": input_embeds}
 
 
 class VisionEmbedding(nn.Module, AttachableStore):
@@ -387,7 +416,7 @@ class VisionEncoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        output = self.self_attn(hidden_states=hidden_states, sequence_mask=sequence_mask)
+        output = self.self_attn(image_hidden_states=hidden_states, sequence_mask=sequence_mask)
         hidden_states = output["image_hidden_states"]
 
         hidden_states = hidden_states + residual
@@ -395,7 +424,7 @@ class VisionEncoderLayer(nn.Module):
         residual = hidden_states
 
         hidden_states = self.layer_norm2(hidden_states)
-        hidden_states = self.mlp(hidden_states=hidden_states)["image_hidden_states"]
+        hidden_states = self.mlp(image_hidden_states=hidden_states)["image_hidden_states"]
         hidden_states = hidden_states + residual
 
         return {
@@ -611,7 +640,7 @@ class Idefics3Connector(nn.Module):
     
     def forward(self, image_hidden_states):
         image_hidden_states = self.pixel_shuffle(image_hidden_states, self.scale_factor)
-        image_hidden_states = self.modality_projector(image_hidden_states=image_hidden_states)["hiddeimage_hidden_statesn_states"]
+        image_hidden_states = self.modality_projector(image_hidden_states=image_hidden_states)["image_hidden_states"]
         return {"image_hidden_states": image_hidden_states}
 
 class InputsMerger(nn.Module):
@@ -661,10 +690,78 @@ class InputsMerger(nn.Module):
             new_inputs_embeds = differentiable_scatter(new_inputs_embeds, group=self.tp_pg)
         else:
             raise ValueError(f"Got unexpected mode: {self.tp_mode}.") 
-
-        print(f"!!!!?!??!?!?: {new_inputs_embeds.shape}")
-
         return {"new_inputs_embeds": new_inputs_embeds}
+
+
+class CombinedEmbeddings(nn.Module):
+    def __init__(
+        self,
+        config: Idefics3Config,
+        parallel_config: Optional[ParallelismArgs],
+        parallel_context: ParallelContext,
+        tp_pg: dist.ProcessGroup,
+        p2p: P2P,
+    ):
+        super().__init__()
+
+        self.p2p = p2p
+
+        self.text_embeddings = LlamaEmbeddings(
+            tp_pg=tp_pg,
+            config=config.llama_config,
+            parallel_config=parallel_config,
+        )
+
+        self.vision_model = VisionTransformer(
+            config=config.vision_config,
+            p2p=self.p2p,
+            parallel_context=parallel_context,
+            parallel_config=parallel_config,
+        )
+
+        self.connector = Idefics3Connector(
+            config=config,
+            parallel_config=parallel_config,
+            tp_pg=tp_pg,
+        )
+
+        self.inputs_merger = InputsMerger(
+            config=config,
+            parallel_config=parallel_config,
+            tp_pg=tp_pg,
+        )
+
+    def forward(
+        self,
+        input_ids: Union[torch.Tensor, TensorPointer],
+        input_mask: Union[torch.Tensor, TensorPointer],
+        pixel_values: Union[torch.Tensor, TensorPointer],
+        pixel_attention_mask: Union[torch.Tensor, TensorPointer] = None,
+    ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
+
+        llama_output = self.text_embeddings(
+            input_ids=input_ids,
+            input_mask=input_mask,
+        )
+
+        vision_output = self.vision_model(
+            pixel_values=pixel_values,
+            pixel_attention_mask=pixel_attention_mask,
+        )
+
+        connector_output = self.connector(
+            image_hidden_states=vision_output,
+        )
+
+        inputs_merger_output = self.inputs_merger(
+            input_ids=input_ids,
+            inputs_embeds=llama_output["input_embeds"],
+            image_hidden_states=connector_output["image_hidden_states"],
+        )
+
+        inputs_merger_output["input_mask"] = input_mask
+
+        return inputs_merger_output
 
 class Idefics3Model(nn.Module):
     def __init__(
@@ -693,58 +790,28 @@ class Idefics3Model(nn.Module):
         p2p = self.llama.p2p
         
         del self.llama.lm_head
+        del self.llama.token_position_embeddings
         
-        self.vision_model = PipelineBlock(
+        self.combined_embeddings = PipelineBlock(
             p2p=p2p,
-            module_builder=VisionTransformer,
+            module_builder=CombinedEmbeddings,
             module_kwargs={
-                "config": config.vision_config,
-                "p2p": p2p,
+                "config": config,
+                "parallel_config": parallel_config,
                 "parallel_context": parallel_context,
-                "parallel_config": parallel_config,
-            },
-            module_input_keys={
-                "pixel_values",
-            },
-            module_output_keys={
-                "image_hidden_states"
-            }
-        )
-
-        self.connector = PipelineBlock(
-            p2p=p2p,
-            module_builder=Idefics3Connector,
-            module_kwargs={
-                "config": config,
-                "parallel_config": parallel_config,
                 "tp_pg": tp_pg,
-            },
-            module_input_keys={
-                "image_hidden_states"
-            },
-            module_output_keys={
-                "image_hidden_states"
-            }
-        )
-
-        self.inputs_merger = PipelineBlock(
-            p2p=p2p,
-            module_builder=InputsMerger,
-            module_kwargs={
-                "config": config,
-                "parallel_config": parallel_config,
-                "tp_pg": tp_pg,
+                "p2p": p2p,
             },
             module_input_keys={
                 "input_ids",
-                "inputs_embeds",
-                "image_hidden_states",
+                "input_mask",
+                "pixel_values",
             },
             module_output_keys={
-                "new_inputs_embeds"
+                "new_inputs_embeds",
+                "input_mask",
             }
         )
-
 
         self.lm_head = PipelineBlock(
             p2p=p2p,
@@ -777,35 +844,25 @@ class Idefics3Model(nn.Module):
         self,
         input_ids: Union[torch.Tensor, TensorPointer],
         input_mask: Union[torch.Tensor, TensorPointer],
-        pixel_values: Union[torch.Tensor, TensorPointer] = None,
+        pixel_values: Union[torch.Tensor, TensorPointer],
         pixel_attention_mask: Union[torch.Tensor, TensorPointer] = None,
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
         # Get sequence from the vision encoder
-        image_hidden_states = self.vision_model(
-            pixel_values=pixel_values,
-        )["image_hidden_states"]
-
-        # Modality projection & resampling
-        image_hidden_states = self.connector(
-            image_hidden_states=image_hidden_states
-        )
-
-        inputs_embeds = self.llama.token_position_embeddings(input_ids=input_ids, input_mask=input_mask)["input_embeds"]
-
-        inputs_embeds = self.inputs_merger(
+        embeds = self.combined_embeddings(
             input_ids=input_ids,
-            inputs_embeds=inputs_embeds,
-            image_hidden_states=image_hidden_states["image_hidden_states"],
-        )["new_inputs_embeds"]
-
-        outputs = self.llama.forward_with_hidden_states(
-            input_ids=None,
-            input_embeds=inputs_embeds,
             input_mask=input_mask,
-            return_logits=False
+            pixel_values=pixel_values,
         )
 
-        hidden_states = outputs
+        hidden_encoder_states = {
+            "hidden_states": embeds["new_inputs_embeds"],
+            "sequence_mask": embeds["input_mask"],
+        }
+        
+        for encoder_block in self.llama.decoder:
+            hidden_encoder_states = encoder_block(**hidden_encoder_states)
+
+        hidden_states = self.llama.final_layer_norm(input=hidden_encoder_states["hidden_states"])["hidden_states"]
 
         sharded_logits = self.lm_head(x=hidden_states)["logits"]
 
