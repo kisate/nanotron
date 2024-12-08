@@ -1,6 +1,6 @@
 checkpoints:
   checkpoint_interval: 10
-  checkpoints_path: checkpoints
+  checkpoints_path: checkpoints_tmp
   checkpoints_path_is_shared_file_system: false
   resume_checkpoint_path: null
   save_initial_state: false
@@ -16,8 +16,9 @@ data_stages:
       batch_encoder: "single_image"
       image_scale_factor: 2
       sample_encoding_workers: 10
-      batch_encoding_workers: 4
-      batch_encoding_batch: 32
+      sample_encoding_batch: 10000
+      batch_encoding_workers: 16
+      batch_encoding_batch: 16
     seed: 42
   name: Stable Training Stage
   start_training_step: 1
@@ -38,8 +39,8 @@ model:
   ddp_bucket_cap_mb: 25
   dtype: bfloat16
   init_method:
-    # path: nanotron-ckpt
-    std: 0.025
+    path: nanotron-ckpt
+    # std: 0.025
   make_vocab_size_divisible_by: 1
   model_config:
     image_token_id: 128257

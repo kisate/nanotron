@@ -102,7 +102,4 @@ class SingleImageBatchEncoder(BatchEncoder[FormattedTextSample]):
             result["label_ids"] = inputs["input_ids"][:, 1:]
             result["label_mask"] = inputs["input_ids"][:, 1:] < self.processor.tokenizer.vocab_size
 
-        return result
-
-
-        
+        return result        
