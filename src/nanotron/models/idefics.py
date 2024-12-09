@@ -23,7 +23,7 @@ from nanotron.generation.generate_store import AttachableStore
 from nanotron.random import RandomStates, branch_random_state
 from nanotron.scaling.parametrization import SpectralMupParametrizator, StandardParametrizator
 from nanotron.utils import checkpoint_method
-from nanotron.models.llama import GLUActivation, LlamaModel
+from nanotron.models.llama import GLUActivation, LlamaDecoderLayer, LlamaModel
 from transformers.modeling_flash_attention_utils import _flash_attention_forward
 from nanotron.parallel.tensor_parallel.functional import sharded_cross_entropy
 
@@ -437,13 +437,11 @@ class VisionTransformer(nn.Module):
     def __init__(
         self, 
         config: Idefics3VisionConfig,
-        p2p: P2P,
         parallel_context: ParallelContext,
         parallel_config: Optional[ParallelismArgs],
     ):
         super().__init__()
         self.config = config
-        self.p2p = p2p
         self.tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
 
         self.embeddings = VisionEmbedding(
@@ -700,12 +698,8 @@ class CombinedEmbeddings(nn.Module):
         parallel_config: Optional[ParallelismArgs],
         parallel_context: ParallelContext,
         tp_pg: dist.ProcessGroup,
-        p2p: P2P,
     ):
         super().__init__()
-
-        self.p2p = p2p
-
         self.text_embeddings = LlamaEmbeddings(
             tp_pg=tp_pg,
             config=config.llama_config,
@@ -714,7 +708,6 @@ class CombinedEmbeddings(nn.Module):
 
         self.vision_model = VisionTransformer(
             config=config.vision_config,
-            p2p=self.p2p,
             parallel_context=parallel_context,
             parallel_config=parallel_config,
         )
@@ -780,27 +773,16 @@ class Idefics3Model(nn.Module):
         tp_linear_async_communication = (
             parallel_config.tp_linear_async_communication if parallel_config is not None else False
         )
-
-        self.llama = LlamaModel(
-            config=config.llama_config,
-            parallel_context=parallel_context,
-            parallel_config=parallel_config,
-        )
-
-        p2p = self.llama.p2p
-        
-        del self.llama.lm_head
-        del self.llama.token_position_embeddings
+        self.p2p = P2P(parallel_context.pp_pg, device=torch.device("cuda"))
         
         self.combined_embeddings = PipelineBlock(
-            p2p=p2p,
+            p2p=self.p2p,
             module_builder=CombinedEmbeddings,
             module_kwargs={
                 "config": config,
                 "parallel_config": parallel_config,
                 "parallel_context": parallel_context,
                 "tp_pg": tp_pg,
-                "p2p": p2p,
             },
             module_input_keys={
                 "input_ids",
@@ -813,8 +795,18 @@ class Idefics3Model(nn.Module):
             }
         )
 
+        self.llama = LlamaModel(
+            config=config.llama_config,
+            parallel_context=parallel_context,
+            parallel_config=parallel_config,
+            p2p = self.p2p
+        )
+        
+        del self.llama.lm_head
+        del self.llama.token_position_embeddings
+
         self.lm_head = PipelineBlock(
-            p2p=p2p,
+            p2p=self.p2p,
             # Understand that this means that we return sharded logits that are going to need to be gathered
             module_builder=TensorParallelColumnLinear,
             module_kwargs={
@@ -847,7 +839,7 @@ class Idefics3Model(nn.Module):
         pixel_values: Union[torch.Tensor, TensorPointer],
         pixel_attention_mask: Union[torch.Tensor, TensorPointer] = None,
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
-        # Get sequence from the vision encoder
+        # Calculated combined visual and textual embeddings
         embeds = self.combined_embeddings(
             input_ids=input_ids,
             input_mask=input_mask,
@@ -859,6 +851,8 @@ class Idefics3Model(nn.Module):
             "sequence_mask": embeds["input_mask"],
         }
         
+        logger.info(f"I'm here")
+
         for encoder_block in self.llama.decoder:
             hidden_encoder_states = encoder_block(**hidden_encoder_states)
 
@@ -887,15 +881,18 @@ class Idefics3Model(nn.Module):
         d_qkv = config.hidden_size // config.num_attention_heads
 
         return {
-            VisionTransformer: 4 * config.num_attention_heads * d_qkv * config.hidden_size
+            CombinedEmbeddings: 4 * config.num_attention_heads * d_qkv * config.hidden_size
             + 3 * d_ff * config.hidden_size * config.num_hidden_layers
         }
     
     def get_block_compute_costs(self):
         llama_cost = self.llama.get_block_compute_costs()
-        vision_cost = self.get_block_compute_costs_vision()
+        costs = self.get_block_compute_costs_vision()
 
-        return {**llama_cost, **vision_cost}
+        costs[LlamaDecoderLayer] = llama_cost[LlamaDecoderLayer]
+        costs[TensorParallelColumnLinear] = self.config.llama_config.hidden_size * self.config.llama_config.vocab_size
+
+        return costs
     
 
 class Idefics3ForTraining(NanotronModel):

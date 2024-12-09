@@ -676,11 +676,15 @@ class LlamaModel(nn.Module):
         config: LlamaConfig,
         parallel_context: ParallelContext,
         parallel_config: Optional[ParallelismArgs],
+        p2p: Optional[P2P] = None
     ):
         super().__init__()
 
         # Declare all the nodes
-        self.p2p = P2P(parallel_context.pp_pg, device=torch.device("cuda"))
+        if p2p is None:
+            p2p = P2P(parallel_context.pp_pg, device=torch.device("cuda"))
+    
+        self.p2p = p2p
         self.config = config
         self.parallel_config = parallel_config
         self.parallel_context = parallel_context
