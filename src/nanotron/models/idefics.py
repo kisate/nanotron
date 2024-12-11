@@ -38,7 +38,7 @@ class LlamaEmbeddings(nn.Module, AttachableStore):
             embedding_dim=config.hidden_size,
             padding_idx=config.pad_token_id,
             pg=tp_pg,
-            mode=parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE,
+            mode=TensorParallelLinearMode.ALL_REDUCE,
         )
         self.pg = tp_pg
 
@@ -55,7 +55,6 @@ class LlamaEmbeddings(nn.Module, AttachableStore):
             store["past_length"] = past_length + cumsum_mask[:, -1]
 
         # Format input in `[seq_length, batch_size]` to support high TP with low batch_size
-        input_ids = input_ids.transpose(0, 1)
         input_embeds = self.token_embedding(input_ids)
         return {"input_embeds": input_embeds}
 
@@ -661,19 +660,6 @@ class InputsMerger(nn.Module):
         image_hidden_states: Union[torch.Tensor, TensorPointer],
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
         
-        # Llama's embedding may leave them scattered
-
-        if self.tp_mode is TensorParallelLinearMode.ALL_REDUCE:
-            inputs_embeds = differentiable_identity(inputs_embeds, group=self.tp_pg)
-        elif self.tp_mode is TensorParallelLinearMode.REDUCE_SCATTER:
-            inputs_embeds = differentiable_all_gather(inputs_embeds, group=self.tp_pg)
-        else:
-            raise ValueError(f"Got unexpected mode: {self.tp_mode}.")
-        
-        # Llama's embedding swaps batch and seq_length
-
-        inputs_embeds = inputs_embeds.transpose(0, 1)
-
         num_images, _, vision_hidden_size = image_hidden_states.shape
         special_image_token_mask = input_ids == self.image_token_id
         new_inputs_embeds = inputs_embeds.clone()
