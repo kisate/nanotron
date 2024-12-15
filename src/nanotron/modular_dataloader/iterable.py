@@ -4,8 +4,9 @@ from nanotron.parallel.context import ParallelContext
 from nanotron import distributed as dist
 from nanotron.modular_dataloader.base import SampleEncoder, BatchEncoder, T_encoded_sample
 from multiprocessing.pool import ThreadPool
-from torchdata.stateful_dataloader import StatefulDataLoader
 from datasets.distributed import split_dataset_by_node
+from torch.utils.data import DataLoader
+
 
 from nanotron.parallel.pipeline_parallel.tensor_pointer import TensorPointer  
 
@@ -52,12 +53,12 @@ def get_train_dataloader(
     output_pp_rank: int,
     micro_batch_size: int,
     sample_encoding_batch: int,
+    consumed_train_samples: int,
     batch_encoding_batch: int,
     seed_worker: int,
     sample_encoding_workers: int,
     batch_encoding_workers: int,
     drop_last: bool = True,
-    dataloader_state: Optional[Dict] = None,
 ): 
     if not isinstance(train_dataset, IterableDataset):
         raise ValueError("Dataset should be a datasets.IterableDataset")
@@ -76,7 +77,7 @@ def get_train_dataloader(
 
         empty_dataset = IterableDataset.from_generator(generator)
 
-        return StatefulDataLoader(
+        return DataLoader(
             empty_dataset,
             batch_size=1,
             num_workers=0,
@@ -100,17 +101,19 @@ def get_train_dataloader(
     def collate_fn(batch: List[Dict[str, Any]]):
         batch = [x["sample_encoded"] for x in batch]
         return batch_encoder.encode(batch)
+    
+    if consumed_train_samples > 0:
+        dp_size = parallel_context.dp_pg.size()
+        skip_batches = consumed_train_samples // dp_size
 
-    dataloader = StatefulDataLoader(
+        train_dataset = train_dataset.skip(skip_batches)
+
+    dataloader = DataLoader(
         train_dataset,
         batch_size=micro_batch_size,
         num_workers=1,
         collate_fn=collate_fn,
     )
-
-    if dataloader_state is not None:
-        dataloader.load_state_dict(dataloader_state)
-
 
     return dataloader
 

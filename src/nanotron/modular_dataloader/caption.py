@@ -72,7 +72,37 @@ class ProcessSampleEncoder(SampleEncoder[ProcessedSample]):
             input_ids=inputs["input_ids"], 
             pixel_values=inputs["pixel_values"]
     )
-    
+
+@dataclass
+class PreprocessedSampleEncoder(SampleEncoder[ProcessedSample]):
+    """
+    Sample encoder for caption samples that also applies processor to it.
+    """
+
+    processor: AutoProcessor
+    sequence_length: int
+
+    def encode(self, sample: Dict[str, Any]) -> ProcessedSample:
+        """
+        Encode a caption sample.
+        """
+        input_ids = torch.tensor(sample["input_ids"], dtype=torch.long)
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+
+        pixel_values = torch.tensor(sample["pixel_values"], dtype=torch.float32)
+        pixel_shape = sample["pixel_shape"]
+
+        pixel_values = pixel_values.reshape(pixel_shape)
+
+        if len(input_ids.shape) == 4:
+            input_ids = input_ids.unsqueeze(0)
+
+        return ProcessedSample(
+            input_ids=input_ids, 
+            pixel_values=pixel_values
+        )
+
 
 def byte_img_to_array(bimg):
     imageStream = io.BytesIO(bimg)
