@@ -127,12 +127,10 @@ def main(args):
 
     target_image_seq_len = int(((image_size // nanotron_config.model.model_config.vision_config.patch_size) ** 2) / (nanotron_config.model.model_config.scale_factor**2))
 
-    processor = AutoProcessor.from_pretrained("HuggingFaceM4/Idefics3-8B-Llama3", image_seq_len=target_image_seq_len, size= {"longest_edge": 2*image_size}, max_image_size = {"longest_edge": image_size})
+    processor = AutoProcessor.from_pretrained("HuggingFaceM4/Idefics3-8B-Llama3", image_seq_len=target_image_seq_len, size= {"longest_edge": 4*image_size}, max_image_size = {"longest_edge": image_size})
 
     text = processor.apply_chat_template(messages, add_generation_prompt=True)
     inputs = processor(images=images, text=text, return_tensors="pt", image_seq_len=target_image_seq_len).to(DEVICE)
-
-    seq_length = inputs.input_ids.size(1)
 
     inputs = {
         "input_ids": inputs['input_ids'],
@@ -145,10 +143,10 @@ def main(args):
 
     with torch.no_grad():
         output = model.model(**inputs)
-        
-    print(output.shape)
 
     if not RANK:
+        print(output.shape)
+
         predicted_tokens = [5, 27, 34]  # Index of the predictions to compare across models
         term_cols = int(os.get_terminal_size().columns / 3)
 
@@ -157,18 +155,7 @@ def main(args):
             print("\n", "=" * term_cols, f"Predictions of token {predicted_token}", "=" * term_cols)
             next_tokens = torch.softmax(output.transpose(0, 1)[0, predicted_token, :], -1)
             
-            print(
-                next_tokens.shape,
-            )
-
-            print(
-                f"128256 probability: {next_tokens[128256].item()}"
-            )
-
-            
             topk_next_tokens = torch.topk(next_tokens, 10)
-
-
 
             print(
                 *[
