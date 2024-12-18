@@ -1,5 +1,5 @@
 """
-torchrun --nproc-per-node 2 tools/idefics3/loss_on_captions_nanotron.py --tp 2 --nanotron-checkpoint-path nanotron-ckpt
+torchrun --nproc-per-node 2 tools/idefics3/loss_on_captions_nanotron.py --tp 2 --nanotron-checkpoint-path nanotron-ckpt --dataset-path "../datasets/ny_captions.hf"
 """
 import argparse
 import os
@@ -19,7 +19,7 @@ from nanotron.parallel.tensor_parallel.nn import TensorParallelLinearMode
 from nanotron.serialize import load_weights
 from nanotron.trainer import mark_tied_parameters
 from transformers import AutoProcessor
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -72,6 +72,13 @@ def get_args():
         required=True,
         help="A path to a directory containing a Nanotron Checkpoint",
     )
+    group = parser.add_argument_group(title="Dataset")
+    group.add_argument(
+        "--dataset-path",
+        type=str,
+        required=False,
+        help="A path to a directory containing the dataset",
+    )
 
     group = parser.add_argument_group(title="Nanotron Parallelism")
     group.add_argument("--tp", type=int, required=True, help="Tensor Parallelism Degree of the Nanotron Checkpoint")
@@ -123,8 +130,12 @@ def main(args):
 
     # Load checkpoint directly in memory and then only keep the state dictionary
     load_weights(model=model, parallel_context=parallel_context, root_folder=Path(args.nanotron_checkpoint_path))
+
+    if args.dataset_path is not None:
+        dataset = load_from_disk(args.dataset_path)
+    else:
+        dataset = load_dataset("jmhessel/newyorker_caption_contest", 'explanation', split="validation[:100]")
     
-    dataset = load_dataset("jmhessel/newyorker_caption_contest", 'explanation', split="validation[:100]")
     processor = AutoProcessor.from_pretrained("HuggingFaceM4/Idefics3-8B-Llama3", size={"longest_edge": 2 * 364})
 
     dataloader = DataLoader(dataset, batch_size=4, num_workers=16, collate_fn=lambda x: collate_fn(x, processor))
