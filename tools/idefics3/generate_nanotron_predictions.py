@@ -7,10 +7,13 @@ import os
 from pathlib import Path
 
 import requests
+import torch
+from PIL import Image
+
+# from sklearn.metrics import accuracy_score
+from transformers import AutoProcessor
 
 import nanotron.distributed as dist
-import numpy as np
-import torch
 from nanotron.config import Config, ParallelismArgs, get_config_from_file
 from nanotron.models import build_model
 from nanotron.models.idefics import Idefics3ForTraining
@@ -20,11 +23,6 @@ from nanotron.parallel.pipeline_parallel.engine import AllForwardAllBackwardPipe
 from nanotron.parallel.tensor_parallel.nn import TensorParallelLinearMode
 from nanotron.serialize import load_weights
 from nanotron.trainer import mark_tied_parameters
-
-# from sklearn.metrics import accuracy_score
-from transformers import AutoTokenizer, AutoProcessor
-from PIL import Image
-
 
 messages = [
     {

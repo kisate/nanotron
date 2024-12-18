@@ -3,21 +3,11 @@ torchrun --nproc-per-node 1 tools/idefics3/loss_on_captions_hf.py --pretrained-m
 """
 
 import argparse
-import os
-from typing import List, Optional
-from PIL import Image
 
-import numpy as np
-import requests
 import torch
-
-from transformers import AutoProcessor, AutoModelForVision2Seq
-from transformers.image_utils import load_image
-from transformers.modeling_flash_attention_utils import _flash_attention_forward
-
-from torch.utils.data import DataLoader
-
 from datasets import load_dataset
+from torch.utils.data import DataLoader
+from transformers import AutoModelForVision2Seq, AutoProcessor
 
 DEVICE = torch.device("cuda")
 TORCH_DTYPE = torch.bfloat16

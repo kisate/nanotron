@@ -6,10 +6,14 @@ import argparse
 import os
 from pathlib import Path
 
-import nanotron.distributed as dist
-import torch.distributed as torch_dist
-import numpy as np
 import torch
+import torch.distributed as torch_dist
+from datasets import load_dataset
+from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
+from transformers import AutoProcessor
+
+import nanotron.distributed as dist
 from nanotron.config import Config, ParallelismArgs, get_config_from_file
 from nanotron.models import build_model
 from nanotron.models.idefics import Idefics3ForTraining
@@ -19,10 +23,6 @@ from nanotron.parallel.pipeline_parallel.engine import AllForwardAllBackwardPipe
 from nanotron.parallel.tensor_parallel.nn import TensorParallelLinearMode
 from nanotron.serialize import load_weights
 from nanotron.trainer import mark_tied_parameters
-from transformers import AutoProcessor
-from datasets import load_dataset
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
 
 DEVICE = torch.device("cuda")
 TORCH_DTYPE = torch.bfloat16

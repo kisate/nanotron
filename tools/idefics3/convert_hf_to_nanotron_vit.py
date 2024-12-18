@@ -4,34 +4,32 @@ HF_HUB_ENABLE_HF_TRANSFER=1 torchrun --nproc-per-node 1 tools/idefics3/convert_h
 
 import sys
 
-from nanotron.parallel.pipeline_parallel.p2p import P2P
-
 sys.path.append(".venv/lib/python3.10/site-packages")
 
 import argparse
-from dataclasses import asdict
 import json
+from dataclasses import asdict
 from pathlib import Path
+
 import torch
-from tqdm import tqdm
 import yaml
+from tqdm import tqdm
+
+# from tools.llama3.convert_hf_to_nanotron import copy_weights_from_hf_to_nanotron as copy_weights_from_hf_to_nanotron_llama
+# from tools.llama3.convert_hf_to_nanotron import nanotron_config_from_hf_config as nanotron_config_from_hf_config_llama
+from transformers import AutoModel, AutoModelForVision2Seq
+
 from nanotron import logging
 from nanotron.config.config import Config, GeneralArgs, LoggingArgs, ModelArgs, TokenizerArgs
-from nanotron.config.models_config import ExistingCheckpointInit, Idefics3VisionConfig, Idefics3Config
+from nanotron.config.models_config import ExistingCheckpointInit, Idefics3VisionConfig
 from nanotron.config.parallelism_config import ParallelismArgs
 from nanotron.logging import log_rank, set_ranks_logging_level
-from nanotron.config.models_config import LlamaConfig as LlamaConfigNanotron
 from nanotron.models.base import build_model
-from nanotron.models.idefics import VisionTransformerNanotron, VisionTransformer
+from nanotron.models.idefics import VisionTransformer, VisionTransformerNanotron
 from nanotron.parallel.context import ParallelContext
 from nanotron.parallel.parameters import sanity_check
 from nanotron.serialize.weights import save_weights
 from nanotron.trainer import mark_tied_parameters
-# from tools.llama3.convert_hf_to_nanotron import copy_weights_from_hf_to_nanotron as copy_weights_from_hf_to_nanotron_llama
-# from tools.llama3.convert_hf_to_nanotron import nanotron_config_from_hf_config as nanotron_config_from_hf_config_llama
-
-from transformers import AutoModelForVision2Seq, AutoTokenizer, AutoModel
-
 
 logger = logging.get_logger(__name__)
 

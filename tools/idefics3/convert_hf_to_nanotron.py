@@ -7,26 +7,27 @@ import sys
 sys.path.append(".venv/lib/python3.10/site-packages")
 
 import argparse
-from dataclasses import asdict
 import json
+from dataclasses import asdict
 from pathlib import Path
+
 import torch
-from tqdm import tqdm
 import yaml
+from tqdm import tqdm
+from transformers import AutoModel, AutoModelForVision2Seq
+
 from nanotron import logging
 from nanotron.config.config import Config, GeneralArgs, LoggingArgs, ModelArgs, TokenizerArgs
-from nanotron.config.models_config import ExistingCheckpointInit, Idefics3VisionConfig, Idefics3Config
+from nanotron.config.models_config import ExistingCheckpointInit, Idefics3Config, Idefics3VisionConfig
+from nanotron.config.models_config import LlamaConfig as LlamaConfigNanotron
 from nanotron.config.parallelism_config import ParallelismArgs
 from nanotron.logging import log_rank, set_ranks_logging_level
-from nanotron.config.models_config import LlamaConfig as LlamaConfigNanotron
 from nanotron.models.base import build_model
 from nanotron.models.idefics import Idefics3ForTraining, Idefics3Model, VisionTransformer
 from nanotron.parallel.context import ParallelContext
 from nanotron.parallel.parameters import sanity_check
 from nanotron.serialize.weights import save_weights
 from nanotron.trainer import mark_tied_parameters
-
-from transformers import AutoModelForVision2Seq, AutoTokenizer, AutoModel
 
 
 def copy_weights_from_hf_to_nanotron_llama(nanotron_model, hf_model, nanotron_config, additional_vocab_size):

@@ -7,11 +7,14 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1 # important for some distributed operations
 torchrun --nproc_per_node=2 examples/vqa/run_train.py --config-file examples/vqa/config_vqa.yaml
 ```
 """
+
 import argparse
 from typing import Dict, cast
 
 import datasets
 import numpy as np
+from torch.utils.data import DataLoader
+
 from nanotron import logging
 from nanotron.config import (
     DataArgs,
@@ -20,7 +23,6 @@ from nanotron.config import (
 )
 from nanotron.dataloader import (
     DataCollatorForCLM,
-    clm_process,
     get_dataloader_worker_init,
     get_datasets,
     get_train_dataloader,
@@ -34,14 +36,10 @@ from nanotron.logging import log_rank
 from nanotron.parallel.pipeline_parallel.utils import get_input_output_pp_ranks
 from nanotron.trainer import DistributedTrainer
 from nanotron.utils import main_rank_first
-from torch.utils.data import DataLoader
-
-
 
 try:
     from huggingface_hub import __version__ as hf_hub_version
-    from transformers import AutoTokenizer
-    from transformers import AutoProcessor
+    from transformers import AutoProcessor, AutoTokenizer
     from transformers import __version__ as tf_version
 except ImportError:
     hf_hub_version = None
@@ -126,7 +124,7 @@ def get_dataloader_from_data_stage(
 
             raw_dataset = raw_dataset.select(range(1000))
 
-            processor = AutoProcessor.from_pretrained(tokenizer_path, size= {"longest_edge": 2*364})
+            processor = AutoProcessor.from_pretrained(tokenizer_path, size={"longest_edge": 2 * 364})
             train_dataset = vqa_process(
                 raw_dataset=raw_dataset,
                 processor=processor,
@@ -134,7 +132,6 @@ def get_dataloader_from_data_stage(
                 dataset_overwrite_cache=data.dataset.dataset_overwrite_cache,
                 sequence_length=trainer.sequence_length,
             )
-
 
             # We load the processed dataset on the ranks requiring it
             dataloader = get_train_dataloader(
@@ -148,7 +145,7 @@ def get_dataloader_from_data_stage(
                 dataloader_num_workers=data.num_loading_workers,
                 seed_worker=data.seed,
                 dataloader_drop_last=True,
-                dataset_columns=["input_ids", "pixel_values"]
+                dataset_columns=["input_ids", "pixel_values"],
             )
 
             # Check if we have enough samples for train_steps
