@@ -374,21 +374,6 @@ def main(args):
         model=nanotron_model, parallel_context=parallel_context, root_folder=Path(args.pretrained_model_name_or_path)
     )
 
-    # Build empty HF Model
-    # log_rank("Init empty HF Llama3 Model", logger=logger, level=logging.INFO, rank=0)
-
-    # hf_llama_model = AutoModelForCausalLM.from_config(  # WARN This takes a long time
-    #     config=LlamaConfigHF(**asdict(nanotron_llama_config)),
-    #     torch_dtype=TORCH_DTYPE,
-    #     attn_implementation="flash_attention_2",
-    # ).to(DEVICE)
-
-    # log_rank("Init empty HF SigLIP Model", logger=logger, level=logging.INFO, rank=0)
-    # hf_siglip_model = AutoModel.from_config(
-    #     config=SigLIPConfigHF(**asdict(nanotron_vision_config)),
-    #     torch_dtype=TORCH_DTYPE,
-    #     attn_implementation="flash_attention_2",
-    # ).to(DEVICE)
 
     log_rank("Init empty HF Idefics3 Model", logger=logger, level=logging.INFO, rank=0)
 
@@ -398,10 +383,6 @@ def main(args):
             torch_dtype=TORCH_DTYPE,
             attn_implementation="flash_attention_2",
         ).to_empty(device=DEVICE)
-
-    # hf_idefics3_model = AutoModelForVision2Seq.from_pretrained(
-    #     args.hf_pretrained_model_name_or_path, torch_dtype=TORCH_DTYPE, attn_implementation="flash_attention_2"
-    # ).to(DEVICE)
 
     # Copy weights from Nanotron to Hugging Face
     copy_weights_from_nanotron_to_hf_llama(
@@ -429,41 +410,11 @@ def main(args):
         nanotron_config=nanotron_idefics3_config,
     )
 
-    # log_rank("Copied weights from Nanotron Idefics3 model to HF model!", logger=logger, level=logging.INFO, rank=0)
-
-    hf_checkpoint_path = Path(
-        args.huggingface_checkpoint_path,
-    )
-
-    # save_weights(
-    #     model=hf_idefics3_model,
-    #     parallel_context=parallel_context,
-    #     root_folder=hf_checkpoint_path,
-    # )
-
     # Store weights
     log_rank("Saving HF model Checkpoint and Tokenizer!", logger=logger, level=logging.INFO, rank=0)
-    # hf_llama_model.save_pretrained(args.hugging_face_checkpoint_path_llama, from_pt=True)
-    # # Store tokenizer
-    # tokenizer_llama = AutoTokenizer.from_pretrained(nanotron_llama_config.tokenizer.tokenizer_name_or_path)
-    # tokenizer_llama.save_pretrained(args.hugging_face_checkpoint_path_llama)
-    # log_rank(
-    #     f"Checkpoint conversion finished, check {args.hugging_face_checkpoint_path_llama}",
-    #     logger=logger,
-    #     level=logging.INFO,
-    #     rank=0,
-    # )
-
-    # # Store weights
-    # hf_siglip_model.save_pretrained(args.hugging_face_checkpoint_path_siglip, from_pt=True)
-    # # Store tokenizer
-    # tokenizer_siglip = AutoTokenizer.from_pretrained(nanotron_vision_config.tokenizer.tokenizer_name_or_path)
-    # tokenizer_siglip.save_pretrained(args.hugging_face_checkpoint_path_siglip)
 
     hf_idefics3_model.save_pretrained(args.huggingface_checkpoint_path, from_pt=True)
     hf_idefics3_model.config.save_pretrained(args.huggingface_checkpoint_path)
-    # tokenizer_idefics3 = AutoTokenizer.from_pretrained(nanotron_config.tokenizer.tokenizer_name_or_path)
-    # tokenizer_idefics3.save_pretrained(args.huggingface_checkpoint_path)
 
     log_rank(
         f"Checkpoint conversion finished, check {args.huggingface_checkpoint_path}",
