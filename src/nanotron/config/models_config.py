@@ -161,7 +161,7 @@ class Idefics3Config:
     Be careful on having a coherent typing as we use it to reconstruct the model from yaml
     """
     vision_config: Idefics3VisionConfig
-    text_config: LlamaConfig
+    llama_config: LlamaConfig
 
     image_token_id: int = 128257
     pad_token_id: int = 128_002

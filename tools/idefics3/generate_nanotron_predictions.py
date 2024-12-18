@@ -1,19 +1,15 @@
 """
 torchrun --nproc-per-node 2 tools/idefics3/generate_nanotron_predictions.py --tp 2 --nanotron-checkpoint-path nanotron-ckpt
 """
-
 import argparse
 import os
 from pathlib import Path
 
 import requests
-import torch
-from PIL import Image
-
-# from sklearn.metrics import accuracy_score
-from transformers import AutoProcessor
 
 import nanotron.distributed as dist
+import numpy as np
+import torch
 from nanotron.config import Config, ParallelismArgs, get_config_from_file
 from nanotron.models import build_model
 from nanotron.models.idefics import Idefics3ForTraining
@@ -23,23 +19,25 @@ from nanotron.parallel.pipeline_parallel.engine import AllForwardAllBackwardPipe
 from nanotron.parallel.tensor_parallel.nn import TensorParallelLinearMode
 from nanotron.serialize import load_weights
 from nanotron.trainer import mark_tied_parameters
+# from sklearn.metrics import accuracy_score
+from transformers import AutoTokenizer, AutoProcessor
+from PIL import Image
 
-messages = [
-    {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": "What’s the difference between these two images?"},
-            {"type": "image"},
-            {"type": "image"},
-        ],
-    },
-    {
-        "role": "assistant",
-        "content": [
-            {"type": "text", "text": "The difference is that one image is about dogs and the other one about cats."},
-        ],
-    },
-]
+
+messages = [{
+    "role": "user",
+    "content": [
+        {"type": "text", "text": "What’s the difference between these two images?"},
+        {"type": "image"},
+        {"type": "image"},
+    ],
+},
+{
+    "role": "assistant",
+    "content": [
+        {"type": "text", "text": "The difference is that one image is about dogs and the other one about cats."},
+    ],
+}]
 
 
 url_1 = "http://images.cocodataset.org/val2017/000000039769.jpg"
@@ -107,13 +105,15 @@ def main(args):
         device=DEVICE,  # TODO Check with different parallelism if cpu is available
     )
 
-    # torch.Size([484, 26, 768])
+    
+    #torch.Size([484, 26, 768])
 
     mark_tied_parameters(model=model, parallel_context=parallel_context)
     sanity_check(root_module=model)
 
     # Load checkpoint directly in memory and then only keep the state dictionary
     load_weights(model=model, parallel_context=parallel_context, root_folder=Path(args.nanotron_checkpoint_path))
+
 
     image_1 = Image.open(requests.get(url_1, stream=True).raw)
     image_2 = Image.open(requests.get(url_2, stream=True).raw)
@@ -122,29 +122,21 @@ def main(args):
     # Using non-Idefics3 image size may break the pixel shuffle
     # For example, instead of 384 you should use either 364 or 404
     image_size = nanotron_config.model.model_config.vision_config.image_size
-
+    
     image_size = 364
 
-    target_image_seq_len = int(
-        ((image_size // nanotron_config.model.model_config.vision_config.patch_size) ** 2)
-        / (nanotron_config.model.model_config.scale_factor**2)
-    )
+    target_image_seq_len = int(((image_size // nanotron_config.model.model_config.vision_config.patch_size) ** 2) / (nanotron_config.model.model_config.scale_factor**2))
 
-    processor = AutoProcessor.from_pretrained(
-        "HuggingFaceM4/Idefics3-8B-Llama3",
-        image_seq_len=target_image_seq_len,
-        size={"longest_edge": 4 * image_size},
-        max_image_size={"longest_edge": image_size},
-    )
+    processor = AutoProcessor.from_pretrained("HuggingFaceM4/Idefics3-8B-Llama3", image_seq_len=target_image_seq_len, size= {"longest_edge": 4*image_size}, max_image_size = {"longest_edge": image_size})
 
     text = processor.apply_chat_template(messages, add_generation_prompt=True)
     inputs = processor(images=images, text=text, return_tensors="pt", image_seq_len=target_image_seq_len).to(DEVICE)
 
     inputs = {
-        "input_ids": inputs["input_ids"],
-        "input_mask": inputs["attention_mask"],
-        "pixel_values": inputs["pixel_values"].bfloat16(),
-        "pixel_attention_mask": inputs["pixel_attention_mask"],
+        "input_ids": inputs['input_ids'],
+        "input_mask": inputs['attention_mask'],
+        "pixel_values": inputs['pixel_values'].bfloat16(),
+        "pixel_attention_mask": inputs['pixel_attention_mask'],
     }
 
     model.eval()
@@ -159,9 +151,10 @@ def main(args):
         term_cols = int(os.get_terminal_size().columns / 3)
 
         for predicted_token in predicted_tokens:
+
             print("\n", "=" * term_cols, f"Predictions of token {predicted_token}", "=" * term_cols)
             next_tokens = torch.softmax(output.transpose(0, 1)[0, predicted_token, :], -1)
-
+            
             topk_next_tokens = torch.topk(next_tokens, 10)
 
             print(
@@ -171,7 +164,6 @@ def main(args):
                 ],
                 sep="\n",
             )
-
 
 if __name__ == "__main__":
     _args = get_args()

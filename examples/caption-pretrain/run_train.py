@@ -4,9 +4,13 @@ Nanotron training script example using a custom dataloader.
 Usage:
 ```
 export CUDA_DEVICE_MAX_CONNECTIONS=1 # important for some distributed operations
-torchrun --nproc_per_node=1 examples/caption-pretrain/run_train.py --config-file examples/caption-pretrain/pretrain.yaml
+torchrun --nproc_per_node=4 examples/caption-pretrain/run_train.py --config-file examples/caption-pretrain/pretrain.yaml
 ```
+
+For preprocessed dataset:
+torchrun --nproc_per_node=4 examples/caption-pretrain/run_train.py --config-file examples/caption-pretrain/pretrain_preprocessed.yaml
 """
+
 import argparse
 from typing import Dict, cast
 
@@ -19,6 +23,7 @@ from nanotron.config import (
     DatasetStageArgs,
 )
 from nanotron.config.config import ImageDatasetsArgs
+from nanotron.helpers import get_consumed_train_samples_of_a_data_stage_from_ckp
 from nanotron.logging import log_rank
 from nanotron.modular_dataloader import BATCH_ENCODERS, SAMPLE_ENCODERS
 from nanotron.modular_dataloader.iterable import get_train_dataloader
@@ -39,6 +44,7 @@ logger = logging.get_logger(__name__)
 def get_dataloader_from_data_stage(
     trainer: DistributedTrainer,
     data: DataArgs,
+    consumed_train_samples: int
 ):
     """
     Returns a dataloader for a given data stage.
@@ -99,8 +105,8 @@ def get_dataloader_from_data_stage(
             seed_worker=data.seed,
             sample_encoding_workers=data.dataset.sample_encoding_workers,
             batch_encoding_workers=data.dataset.batch_encoding_workers,
+            consumed_train_samples=consumed_train_samples,
             drop_last=True,
-            dataloader_state=None,
         )
     else:
         raise ValueError(f"Unsupported dataset case: {data.dataset}")
@@ -115,6 +121,7 @@ def get_dataloader(trainer: DistributedTrainer) -> Dict[str, DataLoader]:
         # NOTE: we only create the dataloader for the first stage,
         # then we lazy initialize the dataloader for the other stages
         stage = cast(DatasetStageArgs, stage)
+        consumed_train_samples = get_consumed_train_samples_of_a_data_stage_from_ckp(stage, trainer.metadata)
 
         log_rank(
             f"[Training Plan] Stage {stage.name}",
@@ -127,11 +134,13 @@ def get_dataloader(trainer: DistributedTrainer) -> Dict[str, DataLoader]:
             get_dataloader_from_data_stage(
                 trainer,
                 stage.data,
+                consumed_train_samples
             )
             if stage_idx == 0
             else lambda stage=stage: get_dataloader_from_data_stage(
                 trainer,
-                stage.data
+                stage.data,
+                consumed_train_samples
             )
         )
         dataloaders[stage.name] = dataloader

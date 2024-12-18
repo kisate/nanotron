@@ -162,7 +162,7 @@ class DifferetiableScatter(torch.autograd.Function):
     def backward(ctx, grad_output):
         group = ctx.group
         return DifferentiableAllGather.apply(grad_output, group), None
-    
+        
 
 class DifferentiableReduceScatterAvg(torch.autograd.Function):
     """Reduce scatter in a differentiable fashion"""

@@ -1,19 +1,15 @@
 """
 torchrun --nproc-per-node 1 tools/idefics3/generate_nanotron_predictions_vit.py --tp 1 --nanotron-checkpoint-path nanotron-ckpt-vit
 """
-
 import argparse
 import os
 from pathlib import Path
 
 import requests
-import torch
-from PIL import Image
-
-# from sklearn.metrics import accuracy_score
-from transformers import AutoProcessor
 
 import nanotron.distributed as dist
+import numpy as np
+import torch
 from nanotron.config import Config, ParallelismArgs, get_config_from_file
 from nanotron.models import build_model
 from nanotron.models.idefics import VisionTransformerNanotron
@@ -23,23 +19,25 @@ from nanotron.parallel.pipeline_parallel.engine import AllForwardAllBackwardPipe
 from nanotron.parallel.tensor_parallel.nn import TensorParallelLinearMode
 from nanotron.serialize import load_weights
 from nanotron.trainer import mark_tied_parameters
+# from sklearn.metrics import accuracy_score
+from transformers import AutoTokenizer, AutoProcessor
+from PIL import Image
 
-messages = [
-    {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": "What’s the difference between these two images?"},
-            {"type": "image"},
-            {"type": "image"},
-        ],
-    },
-    {
-        "role": "assistant",
-        "content": [
-            {"type": "text", "text": "The difference is that one image is about dogs and the other one about cats."},
-        ],
-    },
-]
+
+messages = [{
+    "role": "user",
+    "content": [
+        {"type": "text", "text": "What’s the difference between these two images?"},
+        {"type": "image"},
+        {"type": "image"},
+    ],
+},
+{
+    "role": "assistant",
+    "content": [
+        {"type": "text", "text": "The difference is that one image is about dogs and the other one about cats."},
+    ],
+}]
 
 
 url_1 = "http://images.cocodataset.org/val2017/000000039769.jpg"
@@ -107,13 +105,15 @@ def main(args):
         device=DEVICE,  # TODO Check with different parallelism if cpu is available
     )
 
-    # torch.Size([484, 26, 768])
+    
+    #torch.Size([484, 26, 768])
 
     mark_tied_parameters(model=model, parallel_context=parallel_context)
     sanity_check(root_module=model)
 
     # Load checkpoint directly in memory and then only keep the state dictionary
     load_weights(model=model, parallel_context=parallel_context, root_folder=Path(args.nanotron_checkpoint_path))
+
 
     image_1 = Image.open(requests.get(url_1, stream=True).raw)
     image_2 = Image.open(requests.get(url_2, stream=True).raw)
@@ -122,14 +122,10 @@ def main(args):
     # Using non-Idefics3 image size may break the pixel shuffle
     # For example, instead of 384 you should use either 364 or 404
     image_size = nanotron_config.model.model_config.image_size
-
+    
     image_size = 364
 
-    processor = AutoProcessor.from_pretrained(
-        "HuggingFaceM4/Idefics3-8B-Llama3",
-        size={"longest_edge": 2 * image_size},
-        max_image_size={"longest_edge": image_size},
-    )
+    processor = AutoProcessor.from_pretrained("HuggingFaceM4/Idefics3-8B-Llama3", size= {"longest_edge": 2*image_size}, max_image_size = {"longest_edge": image_size})
 
     text = processor.apply_chat_template(messages, add_generation_prompt=True)
     inputs = processor(images=images, text=text, return_tensors="pt").to(DEVICE)
@@ -137,14 +133,15 @@ def main(args):
     seq_length = inputs.input_ids.size(1)
 
     inputs = {
-        "input_ids": inputs["input_ids"],
-        "input_mask": inputs["attention_mask"],
-        "pixel_values": inputs["pixel_values"].bfloat16(),
-        "pixel_attention_mask": inputs["pixel_attention_mask"],
+        "input_ids": inputs['input_ids'],
+        "input_mask": inputs['attention_mask'],
+        "pixel_values": inputs['pixel_values'].bfloat16(),
+        "pixel_attention_mask": inputs['pixel_attention_mask'],
     }
 
     pixel_values = inputs["pixel_values"]
     pixel_attention_mask = inputs["pixel_attention_mask"]
+
 
     batch_size, num_images, num_channels, height, width = pixel_values.size()
 
@@ -159,10 +156,12 @@ def main(args):
             size=(pixel_values.size(0), pixel_values.size(2), pixel_values.size(3)),
             dtype=torch.bool,
             device=pixel_values.device,
-        )
+            )
     else:
         # Remove padding images from the mask/pP p
-        pixel_attention_mask = pixel_attention_mask.view(batch_size * num_images, *pixel_attention_mask.shape[2:])
+        pixel_attention_mask = pixel_attention_mask.view(
+            batch_size * num_images, *pixel_attention_mask.shape[2:]
+        )
         pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
 
     patch_size = nanotron_config.model.model_config.patch_size
@@ -171,6 +170,7 @@ def main(args):
     patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) == patch_size * patch_size).bool()
 
     pixel_values = pixel_values.bfloat16()
+
 
     model.eval()
 

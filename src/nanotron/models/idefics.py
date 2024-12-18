@@ -1,41 +1,34 @@
-from typing import Dict, Optional, Union
-
 import torch
+from typing import Dict, Optional, Union
 from torch import nn
 
 from nanotron import logging
-from nanotron.config import Idefics3Config, Idefics3VisionConfig
 from nanotron.config.config import Config
 from nanotron.config.models_config import LlamaConfig, RandomInit, SpectralMupInit
 from nanotron.config.parallelism_config import ParallelismArgs
-from nanotron.distributed import dist
-from nanotron.generation.generate_store import AttachableStore
 from nanotron.logging import log_rank
 from nanotron.models.base import NanotronModel
-from nanotron.models.llama import GLUActivation, LlamaDecoderLayer, LlamaModel
 from nanotron.nn.layer_norm import TritonLayerNorm
 from nanotron.parallel.context import ParallelContext
 from nanotron.parallel.parameters import NanotronParameter
 from nanotron.parallel.pipeline_parallel.block import PipelineBlock
 from nanotron.parallel.pipeline_parallel.p2p import P2P
 from nanotron.parallel.pipeline_parallel.tensor_pointer import TensorPointer
-from nanotron.parallel.tensor_parallel.distributed_differentiable_primitives import (
-    differentiable_identity,
-    differentiable_scatter,
-)
+from nanotron.parallel.tensor_parallel.distributed_differentiable_primitives import differentiable_all_gather, differentiable_identity, differentiable_scatter
 from nanotron.parallel.tensor_parallel.enum import TensorParallelLinearMode
-from nanotron.parallel.tensor_parallel.functional import sharded_cross_entropy
-from nanotron.parallel.tensor_parallel.nn import (
-    TensorParallelColumnLinear,
-    TensorParallelEmbedding,
-    TensorParallelRowLinear,
-)
-from nanotron.random import RandomStates
+from nanotron.parallel.tensor_parallel.nn import TensorParallelColumnLinear, TensorParallelEmbedding, TensorParallelRowLinear
+from nanotron.distributed import dist
+from nanotron.config import Idefics3VisionConfig, Idefics3Config
+from nanotron.generation.generate_store import AttachableStore
+from nanotron.random import RandomStates, branch_random_state
 from nanotron.scaling.parametrization import SpectralMupParametrizator, StandardParametrizator
 from nanotron.utils import checkpoint_method
+from nanotron.models.llama import GLUActivation, LlamaDecoderLayer, LlamaModel
+from transformers.modeling_flash_attention_utils import _flash_attention_forward
+from nanotron.parallel.tensor_parallel.functional import sharded_cross_entropy
+
 
 logger = logging.get_logger(__name__)
-
 
 class LlamaEmbeddings(nn.Module, AttachableStore):
     def __init__(self, tp_pg: dist.ProcessGroup, config: LlamaConfig, parallel_config: Optional[ParallelismArgs]):
@@ -61,6 +54,7 @@ class LlamaEmbeddings(nn.Module, AttachableStore):
             # Store new past_length in store
             store["past_length"] = past_length + cumsum_mask[:, -1]
 
+        # Format input in `[seq_length, batch_size]` to support high TP with low batch_size
         input_embeds = self.token_embedding(input_ids)
         return {"input_embeds": input_embeds}
 
@@ -69,10 +63,7 @@ class VisionEmbedding(nn.Module, AttachableStore):
     """
     Sharded implementation of the Idefics3VisionEmbeddings from huggingface for nanotron. Uses CLIPVit for megatron as a reference.
     """
-
-    def __init__(
-        self, tp_pg: dist.ProcessGroup, config: Idefics3VisionConfig, parallel_config: Optional[ParallelismArgs]
-    ):
+    def __init__(self, tp_pg: dist.ProcessGroup, config: Idefics3VisionConfig, parallel_config: Optional[ParallelismArgs]):
         super().__init__()
         self.tp_pg = tp_pg
         self.embed_dim = config.hidden_size
@@ -88,7 +79,7 @@ class VisionEmbedding(nn.Module, AttachableStore):
         )
 
         self.num_patches_per_side = self.image_size // self.patch_size
-        self.num_patches = self.num_patches_per_side**2
+        self.num_patches = self.num_patches_per_side ** 2
         self.num_positions = self.num_patches
 
         self.position_embedding = TensorParallelEmbedding(
@@ -98,11 +89,7 @@ class VisionEmbedding(nn.Module, AttachableStore):
             mode=TensorParallelLinearMode.ALL_REDUCE,
         )
 
-    def forward(
-        self,
-        pixel_values: torch.FloatTensor,  # [combined_images, num_channels, height, width]
-        patch_attention_mask: torch.BoolTensor,  # [combined_images, num_patches_per_side, num_patches_per_side]
-    ) -> Dict[str, torch.Tensor]:
+    def forward(self, pixel_values: torch.FloatTensor, patch_attention_mask: torch.BoolTensor) -> Dict[str, torch.Tensor]:
         batch_size, _, max_im_h, max_im_w = pixel_values.shape
 
         patch_embeds = self.patch_embedding(pixel_values)
@@ -130,9 +117,7 @@ class VisionEmbedding(nn.Module, AttachableStore):
         group_size = self.tp_pg.size()
 
         if first_dim % group_size != 0:
-            position_ids = nn.functional.pad(
-                position_ids, (0, 0, 0, group_size - first_dim % group_size), mode="constant", value=0
-            )
+            position_ids = nn.functional.pad(position_ids, (0, 0, 0, group_size - first_dim % group_size), mode="constant", value=0)
 
         position_ids = position_ids.to(self.position_embedding.weight.device)
 
@@ -143,12 +128,12 @@ class VisionEmbedding(nn.Module, AttachableStore):
         return {
             "embeddings": embeddings,
         }
-
+        
 
 class VisionCoreAttention(nn.Module):
     def __init__(self, config: Idefics3VisionConfig, parallel_config: Optional[ParallelismArgs]):
         super().__init__()
-
+        
         assert (
             config.hidden_size % config.num_attention_heads == 0
         ), "hidden_size must be divisible by num_attention_heads"
@@ -175,7 +160,7 @@ class VisionCoreAttention(nn.Module):
         softmax_scale = 1 / query_states.shape[-1] if self.is_using_mup else None
         causal = False
         dropout_rate = self.dropout if self.training else 0.0
-
+        
         attn_output = flash_attn_func(
             q=query_states,
             k=key_states,
@@ -186,21 +171,11 @@ class VisionCoreAttention(nn.Module):
             return_attn_probs=False,
         )
 
-        return attn_output
-
-
+        return attn_output 
+    
 class VisionSelfAttention(nn.Module, AttachableStore):
-    """
-    Primarily follows llama.CausalSelfAttention; however, it expects non-swapped batch and sequence dimensions and is non-causal.
-    """
-
-    def __init__(
-        self,
-        config: Idefics3VisionConfig,
-        parallel_config: Optional[ParallelismArgs],
-        tp_pg: dist.ProcessGroup,
-        layer_idx: int,
-    ):
+    def __init__(self, config: Idefics3VisionConfig, parallel_config: Optional[ParallelismArgs],
+    tp_pg: dist.ProcessGroup, layer_idx: int):
         super().__init__()
         self.layer_idx = layer_idx
         assert (
@@ -231,6 +206,8 @@ class VisionSelfAttention(nn.Module, AttachableStore):
         self.d_model = config.hidden_size
         self.is_using_mup = config.is_using_mup
 
+
+
         tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
         tp_linear_async_communication = (
             parallel_config.tp_linear_async_communication if parallel_config is not None else False
@@ -239,7 +216,7 @@ class VisionSelfAttention(nn.Module, AttachableStore):
         qkv_contiguous_chunks = (
             config.num_attention_heads * self.d_qk,
             config.num_key_value_heads * self.d_qk,
-            config.num_key_value_heads * self.d_qk,
+            config.num_key_value_heads * self.d_qk
         )
 
         self.qkv_proj = TensorParallelColumnLinear(
@@ -250,7 +227,7 @@ class VisionSelfAttention(nn.Module, AttachableStore):
             bias=True,
             async_communication=tp_linear_async_communication,
             contiguous_chunks=qkv_contiguous_chunks,
-            tp_recompute_allgather=parallel_config.tp_recompute_allgather,
+            tp_recompute_allgather=parallel_config.tp_recompute_allgather
         )
 
         self.o_proj = TensorParallelRowLinear(
@@ -269,15 +246,22 @@ class VisionSelfAttention(nn.Module, AttachableStore):
 
     def forward(
         self,
-        image_hidden_states: torch.Tensor,  # [combined_images, image_tokens_length, hidden_dim]
-        sequence_mask,
+        image_hidden_states: torch.Tensor,
+        sequence_mask
     ):
+        from flash_attn import bert_padding
+        from flash_attn.flash_attn_interface import (
+            flash_attn_varlen_func,
+            flash_attn_with_kvcache,
+        )
+
         hidden_states = image_hidden_states
 
         qkv_states = self.qkv_proj(
             hidden_states
-        )  # [combined_images, image_tokens_length, n_local_q_heads * d_qk + 2 * n_local_kv_heads * d_qk]
+        )  # [batch_size, seq_length, n_local_q_heads * d_qk + 2 * n_local_kv_heads * d_qk]
         batch_size, q_length, _ = qkv_states.shape
+
 
         if self.is_gqa:
             query_states, key_states, value_states = torch.split(
@@ -290,22 +274,32 @@ class VisionSelfAttention(nn.Module, AttachableStore):
                 dim=-1,
             )
 
-            query_states = query_states.contiguous().view(batch_size, q_length, self.n_local_q_heads, self.d_qk)
-            key_states = key_states.contiguous().view(batch_size, q_length, self.n_local_kv_heads, self.d_qk)
-            value_states = value_states.contiguous().view(batch_size, q_length, self.n_local_kv_heads, self.d_qk)
+            query_states = (
+                query_states.contiguous().view(batch_size, q_length, self.n_local_q_heads, self.d_qk)
+            )
+            key_states = (
+                key_states.contiguous().view(batch_size, q_length, self.n_local_kv_heads, self.d_qk)
+            )
+            value_states = (
+                value_states.contiguous().view(batch_size, q_length, self.n_local_kv_heads, self.d_qk)
+            )
         else:
             query_states, key_states, value_states = (
                 qkv_states.view(batch_size, q_length, 3, self.n_local_q_heads, self.d_qk)
                 .permute(2, 0, 1, 3, 4)
                 .contiguous()
-            )  # [3, combined_images, image_tokens_length, n_local_q_heads, d_qk]
+            )  # [3, batch_size, seq_length, n_local_q_heads, d_qk]
 
-        # [2, combined_images, image_tokens_length, num_heads, d_qk]
+
+        # Apply rotary embeddings to query/key states
+        # NOTE: The layout is different from models/llama.py which is [batch_size, num_heads, seq_length, d_qk]
+        # Here it is, [batch_size, seq_length, num_heads, d_qk]
+        # [2, batch_size, seq_length, num_heads, d_qk]
         key_value_states = torch.cat([key_states.unsqueeze(0), value_states.unsqueeze(0)], dim=0)
-        # [combined_images, image_tokens_length, 2, num_heads, d_qk]
+        # [batch_size, seq_length, 2, num_heads, d_qk]
         key_value_states = key_value_states.permute(1, 2, 0, 3, 4).contiguous()
 
-        # [combined_images, image_tokens_length, num_heads, d_qk]
+        # [batch_size, seq_length, num_heads, d_qk]
         key_states, value_states = torch.split(key_value_states, 1, dim=2)
 
         kv_length = key_states.shape[1]
@@ -316,29 +310,35 @@ class VisionSelfAttention(nn.Module, AttachableStore):
             query_states=query_states,
             key_states=key_states,
             value_states=value_states,
-        )
+        )   
 
-        attention_output = attention_output.contiguous().view(batch_size, q_length, self.n_local_q_heads * self.d_v)
+        attention_output = (
+            attention_output.contiguous().view(batch_size, q_length, self.n_local_q_heads * self.d_v)
+        )
 
         output = self.o_proj(attention_output)
 
         return {"image_hidden_states": output, "sequence_mask": sequence_mask}
-
+    
 
 class VisionMLP(nn.Module):
     def __init__(
-        self,
-        config: Idefics3VisionConfig,
-        parallel_config: Optional[ParallelismArgs],
-        tp_pg: dist.ProcessGroup,
+            self,
+            config: Idefics3VisionConfig,
+            parallel_config: Optional[ParallelismArgs],
+            tp_pg: dist.ProcessGroup,
     ):
         super().__init__()
+
+        # TODO @thomasw21: refactor so that we store that default in a single place.
         tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
         tp_linear_async_communication = (
             parallel_config.tp_linear_async_communication if parallel_config is not None else False
         )
 
-        first_contiguous_chunks = (config.intermediate_size,)
+        first_contiguous_chunks = (
+            config.intermediate_size,  # shape of up_linear
+        )
         self.fc1 = TensorParallelColumnLinear(
             config.hidden_size,
             config.intermediate_size,
@@ -359,10 +359,11 @@ class VisionMLP(nn.Module):
         )
         self.act = torch.compile(lambda x: nn.functional.gelu(x, approximate="tanh"))
 
-    def forward(self, image_hidden_states):  # [combined_images, image_tokens_length, hidden_dim]
+    def forward(self, image_hidden_states):  # [seq_length, batch_size, hidden_dim]
         merged_states = self.fc1(image_hidden_states)
         image_hidden_states = self.fc2(self.act(merged_states))
         return {"image_hidden_states": image_hidden_states}
+    
 
 
 class VisionEncoderLayer(nn.Module):
@@ -386,11 +387,12 @@ class VisionEncoderLayer(nn.Module):
             config.hidden_size,
             eps=config.layer_norm_eps,
         )
-
+        
         self.layer_norm2 = TritonLayerNorm(
             config.hidden_size,
             eps=config.layer_norm_eps,
         )
+
 
         self.mlp = VisionMLP(
             config,
@@ -401,11 +403,13 @@ class VisionEncoderLayer(nn.Module):
         self.tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
         self.layer_id = layer_id
 
+
     def forward(
         self,
-        image_hidden_states: Union[torch.Tensor, TensorPointer],  # [combined_images, image_tokens_length, hidden_dim]
+        image_hidden_states: Union[torch.Tensor, TensorPointer],
         sequence_mask: Union[torch.Tensor, TensorPointer],
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
+        
         hidden_states = image_hidden_states
 
         residual = hidden_states
@@ -426,11 +430,11 @@ class VisionEncoderLayer(nn.Module):
             "image_hidden_states": hidden_states,
             "sequence_mask": output["sequence_mask"],
         }
-
+    
 
 class VisionTransformer(nn.Module):
     def __init__(
-        self,
+        self, 
         config: Idefics3VisionConfig,
         parallel_context: ParallelContext,
         parallel_config: Optional[ParallelismArgs],
@@ -464,8 +468,8 @@ class VisionTransformer(nn.Module):
 
     def forward(
         self,
-        pixel_values: Union[torch.Tensor, TensorPointer],  # [batch_size, num_images, num_channels, height, width]
-        pixel_attention_mask: Union[torch.Tensor, TensorPointer] = None,  # [batch_size, height, width]
+        pixel_values: Union[torch.Tensor, TensorPointer],
+        pixel_attention_mask: Union[torch.Tensor, TensorPointer] = None,
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
         batch_size = pixel_values.size(0)
 
@@ -482,10 +486,12 @@ class VisionTransformer(nn.Module):
                 size=(pixel_values.size(0), pixel_values.size(2), pixel_values.size(3)),
                 dtype=torch.bool,
                 device=pixel_values.device,
-            )
+                )
         else:
             # Remove padding images from the mask/pP p
-            pixel_attention_mask = pixel_attention_mask.view(batch_size * num_images, *pixel_attention_mask.shape[2:])
+            pixel_attention_mask = pixel_attention_mask.view(
+                batch_size * num_images, *pixel_attention_mask.shape[2:]
+            )
             pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
 
         patch_size = self.config.patch_size
@@ -567,12 +573,11 @@ class Idefics3MLP(nn.Module):
         )
         self.split_silu_mul = torch.compile(GLUActivation(config.hidden_act))
 
-    def forward(self, image_hidden_states):  # [combined_images, image_tokens_length, hidden_dim]
+    def forward(self, image_hidden_states):  # [seq_length, batch_size, hidden_dim]
         merged_states = self.gate_up_proj(image_hidden_states)
         image_hidden_states = self.down_proj(self.split_silu_mul(merged_states))
         return {"image_hidden_states": image_hidden_states}
-
-
+    
 class Idefics3SimpleMLP(nn.Module):
     def __init__(
         self,
@@ -590,21 +595,26 @@ class Idefics3SimpleMLP(nn.Module):
 
         hidden_size = config.vision_config.hidden_size
 
-        self.input_size = hidden_size * (config.scale_factor**2)
-        self.output_size = config.text_config.hidden_size
-        self.proj = nn.Linear(self.input_size, self.output_size, bias=False)
+        self.input_size = hidden_size * (config.scale_factor ** 2)
+        self.output_size = config.llama_config.hidden_size
+        self.proj = nn.Linear(
+            self.input_size,
+            self.output_size,
+            bias = False
+        )
 
-    def forward(self, image_hidden_states):  # [combined_images, image_tokens_length, hidden_dim]
+    def forward(self, image_hidden_states):
         image_hidden_states = self.proj(image_hidden_states)
         return {"image_hidden_states": image_hidden_states}
-
+    
 
 class Idefics3Connector(nn.Module):
-    """
-    Pixel shuffle operation from the Idefics3 paper. May break with certain image seq lengths.
-    """
-
-    def __init__(self, config: Idefics3Config, parallel_config: Optional[ParallelismArgs], tp_pg: dist.ProcessGroup):
+    def __init__(
+        self,
+        config: Idefics3Config,
+        parallel_config: Optional[ParallelismArgs],
+        tp_pg: dist.ProcessGroup
+    ):
         super().__init__()
         self.scale_factor = config.scale_factor
         self.modality_projector = Idefics3SimpleMLP(
@@ -624,27 +634,32 @@ class Idefics3Connector(nn.Module):
         x = x.permute(0, 2, 1, 3)
         x = x.reshape(bsz, int(seq / (scale_factor**2)), embed_dim * (scale_factor**2))
         return x
-
-    def forward(self, image_hidden_states):  # [combined_images, image_tokens_length, hidden_dim]
+    
+    def forward(self, image_hidden_states):
         image_hidden_states = self.pixel_shuffle(image_hidden_states, self.scale_factor)
         image_hidden_states = self.modality_projector(image_hidden_states=image_hidden_states)["image_hidden_states"]
         return {"image_hidden_states": image_hidden_states}
 
-
 class InputsMerger(nn.Module):
-    def __init__(self, config: Idefics3Config, parallel_config: Optional[ParallelismArgs], tp_pg: dist.ProcessGroup):
+    def __init__(
+        self, 
+        config: Idefics3Config,
+        parallel_config: Optional[ParallelismArgs],
+        tp_pg: dist.ProcessGroup            
+    ):
         super().__init__()
         self.tp_pg = tp_pg
         self.tp_mode = parallel_config.tp_mode if parallel_config is not None else TensorParallelLinearMode.ALL_REDUCE
-
+        
         self.image_token_id = config.image_token_id
 
     def forward(
         self,
-        input_ids: Union[torch.Tensor, TensorPointer],  # [seq_length, batch_size]
-        inputs_embeds: Union[torch.Tensor, TensorPointer],  # [batch_size, seq_length, hidden_dim]
-        image_hidden_states: Union[torch.Tensor, TensorPointer],  # [combined_images, image_tokens_length, hidden_dim]
+        input_ids: Union[torch.Tensor, TensorPointer],
+        inputs_embeds: Union[torch.Tensor, TensorPointer],
+        image_hidden_states: Union[torch.Tensor, TensorPointer],
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
+        
         num_images, _, vision_hidden_size = image_hidden_states.shape
         special_image_token_mask = input_ids == self.image_token_id
         new_inputs_embeds = inputs_embeds.clone()
@@ -658,7 +673,7 @@ class InputsMerger(nn.Module):
         elif self.tp_mode is TensorParallelLinearMode.REDUCE_SCATTER:
             new_inputs_embeds = differentiable_scatter(new_inputs_embeds, group=self.tp_pg)
         else:
-            raise ValueError(f"Got unexpected mode: {self.tp_mode}.")
+            raise ValueError(f"Got unexpected mode: {self.tp_mode}.") 
         return {"new_inputs_embeds": new_inputs_embeds}
 
 
@@ -673,7 +688,7 @@ class CombinedEmbeddings(nn.Module):
         super().__init__()
         self.text_embeddings = LlamaEmbeddings(
             tp_pg=tp_pg,
-            config=config.text_config,
+            config=config.llama_config,
             parallel_config=parallel_config,
         )
 
@@ -697,11 +712,12 @@ class CombinedEmbeddings(nn.Module):
 
     def forward(
         self,
-        input_ids: Union[torch.Tensor, TensorPointer], # [batch_size, seq_length]
-        input_mask: Union[torch.Tensor, TensorPointer], # [batch_size, seq_length]
-        pixel_values: Union[torch.Tensor, TensorPointer], # [batch_size, num_images, num_channels, height, width]
+        input_ids: Union[torch.Tensor, TensorPointer],
+        input_mask: Union[torch.Tensor, TensorPointer],
+        pixel_values: Union[torch.Tensor, TensorPointer],
         pixel_attention_mask: Union[torch.Tensor, TensorPointer] = None,
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
+
         llama_output = self.text_embeddings(
             input_ids=input_ids,
             input_mask=input_mask,
@@ -726,7 +742,6 @@ class CombinedEmbeddings(nn.Module):
 
         return inputs_merger_output
 
-
 class Idefics3Model(nn.Module):
     def __init__(
         self,
@@ -745,7 +760,7 @@ class Idefics3Model(nn.Module):
             parallel_config.tp_linear_async_communication if parallel_config is not None else False
         )
         self.p2p = P2P(parallel_context.pp_pg, device=torch.device("cuda"))
-
+        
         self.combined_embeddings = PipelineBlock(
             p2p=self.p2p,
             module_builder=CombinedEmbeddings,
@@ -763,13 +778,16 @@ class Idefics3Model(nn.Module):
             module_output_keys={
                 "new_inputs_embeds",
                 "input_mask",
-            },
+            }
         )
 
         self.llama = LlamaModel(
-            config=config.text_config, parallel_context=parallel_context, parallel_config=parallel_config, p2p=self.p2p
+            config=config.llama_config,
+            parallel_context=parallel_context,
+            parallel_config=parallel_config,
+            p2p = self.p2p
         )
-
+        
         del self.llama.lm_head
         del self.llama.token_position_embeddings
 
@@ -778,8 +796,8 @@ class Idefics3Model(nn.Module):
             # Understand that this means that we return sharded logits that are going to need to be gathered
             module_builder=TensorParallelColumnLinear,
             module_kwargs={
-                "in_features": config.text_config.hidden_size,
-                "out_features": config.text_config.vocab_size,
+                "in_features": config.llama_config.hidden_size,
+                "out_features": config.llama_config.vocab_size,
                 "pg": parallel_context.tp_pg,
                 "bias": False,
                 # TODO @thomasw21: refactor so that we store that default in a single place.
@@ -791,6 +809,7 @@ class Idefics3Model(nn.Module):
             module_output_keys={"logits"},
         )
 
+
         self.cast_to_fp32 = PipelineBlock(
             p2p=self.llama.p2p,
             module_builder=lambda: lambda x: x.float(),
@@ -798,12 +817,12 @@ class Idefics3Model(nn.Module):
             module_input_keys={"x"},
             module_output_keys={"output"},
         )
-
+        
     def forward_with_hidden_states(
         self,
-        input_ids: Union[torch.Tensor, TensorPointer], # [batch_size, seq_length]
-        input_mask: Union[torch.Tensor, TensorPointer], # [batch_size, seq_length]
-        pixel_values: Union[torch.Tensor, TensorPointer], # [batch_size, num_images, num_channels, height, width]
+        input_ids: Union[torch.Tensor, TensorPointer],
+        input_mask: Union[torch.Tensor, TensorPointer],
+        pixel_values: Union[torch.Tensor, TensorPointer],
         pixel_attention_mask: Union[torch.Tensor, TensorPointer] = None,
     ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
         # Calculated combined visual and textual embeddings
@@ -818,8 +837,6 @@ class Idefics3Model(nn.Module):
             "sequence_mask": embeds["input_mask"],
         }
 
-        logger.info("I'm here")
-
         for encoder_block in self.llama.decoder:
             hidden_encoder_states = encoder_block(**hidden_encoder_states)
 
@@ -833,18 +850,15 @@ class Idefics3Model(nn.Module):
 
     def forward(
         self,
-        input_ids: Union[torch.Tensor, TensorPointer], # [batch_size, seq_length]
-        input_mask: Union[torch.Tensor, TensorPointer], # [batch_size, seq_length]
-        pixel_values: Union[torch.Tensor, TensorPointer] = None, # [batch_size, num_images, num_channels, height, width]
+        input_ids: Union[torch.Tensor, TensorPointer],
+        input_mask: Union[torch.Tensor, TensorPointer],
+        pixel_values: Union[torch.Tensor, TensorPointer] = None,
         pixel_attention_mask: Union[torch.Tensor, TensorPointer] = None,
     ):
         return self.forward_with_hidden_states(
-            input_ids=input_ids,
-            input_mask=input_mask,
-            pixel_values=pixel_values,
-            pixel_attention_mask=pixel_attention_mask,
+            input_ids=input_ids, input_mask=input_mask, pixel_values=pixel_values, pixel_attention_mask=pixel_attention_mask
         )[0]
-
+    
     def get_block_compute_costs_vision(self):
         config = self.config.vision_config
         d_ff = config.intermediate_size
@@ -854,16 +868,16 @@ class Idefics3Model(nn.Module):
             CombinedEmbeddings: 4 * config.num_attention_heads * d_qkv * config.hidden_size
             + 3 * d_ff * config.hidden_size * config.num_hidden_layers
         }
-
+    
     def get_block_compute_costs(self):
         llama_cost = self.llama.get_block_compute_costs()
         costs = self.get_block_compute_costs_vision()
 
         costs[LlamaDecoderLayer] = llama_cost[LlamaDecoderLayer]
-        costs[TensorParallelColumnLinear] = self.config.text_config.hidden_size * self.config.text_config.vocab_size
+        costs[TensorParallelColumnLinear] = self.config.llama_config.hidden_size * self.config.llama_config.vocab_size
 
         return costs
-
+    
 
 class Idefics3ForTraining(NanotronModel):
     def __init__(
@@ -879,7 +893,7 @@ class Idefics3ForTraining(NanotronModel):
             config=config,
             parallel_context=parallel_context,
             parallel_config=parallel_config,
-            tp_pg=parallel_context.tp_pg,
+            tp_pg=parallel_context.tp_pg
         )
 
         self.loss = PipelineBlock(
@@ -920,6 +934,7 @@ class Idefics3ForTraining(NanotronModel):
         )["loss"]
 
         return {"loss": loss}
+    
 
     @torch.no_grad()
     def init_model_randomly(self, config: Config):
@@ -974,31 +989,24 @@ class Idefics3ForTraining(NanotronModel):
             assert full_param_name not in initialized_parameters
             initialized_parameters.add(full_param_name)
 
-        assert (
-            initialized_parameters
-            == {
-                param.get_tied_info().get_full_name_from_module_id_to_prefix(module_id_to_prefix=module_id_to_prefix)
-                if param.is_tied
-                else name
-                for name, param in model.named_parameters()
-            }
-        ), f"Somehow the initialized set of parameters don't match:\n - Expected: { {name for name, _ in model.named_parameters()} }\n - Got: {initialized_parameters}"
+        assert initialized_parameters == {
+            param.get_tied_info().get_full_name_from_module_id_to_prefix(module_id_to_prefix=module_id_to_prefix)
+            if param.is_tied
+            else name
+            for name, param in model.named_parameters()
+        }, f"Somehow the initialized set of parameters don't match:\n - Expected: { {name for name, _ in model.named_parameters()} }\n - Got: {initialized_parameters}"
 
     def get_block_compute_costs(self):
         return self.model.get_block_compute_costs()
 
     def get_embeddings_lm_head_tied_names(self):
         """Get the names of the tied embeddings and lm_head weights"""
-        if self.config.text_config.tie_word_embeddings is True:
-            return [
-                "model.llama.token_position_embeddings.pp_block.token_embedding.weight",
-                "model.llama.lm_head.pp_block.weight",
-            ]
+        if self.config.llama_config.tie_word_embeddings is True:
+            return ["model.llama.token_position_embeddings.pp_block.token_embedding.weight", "model.llama.lm_head.pp_block.weight"]
         else:
             return []
 
     def get_flops_per_sec(self, iteration_time_in_sec, sequence_length, global_batch_size):
-        # TODO add vision flops
         return self.model.llama.get_flops_per_sec(iteration_time_in_sec, sequence_length, global_batch_size)
 
 
@@ -1085,15 +1093,12 @@ class VisionTransformerNanotron(NanotronModel):
             assert full_param_name not in initialized_parameters
             initialized_parameters.add(full_param_name)
 
-        assert (
-            initialized_parameters
-            == {
-                param.get_tied_info().get_full_name_from_module_id_to_prefix(module_id_to_prefix=module_id_to_prefix)
-                if param.is_tied
-                else name
-                for name, param in model.named_parameters()
-            }
-        ), f"Somehow the initialized set of parameters don't match:\n - Expected: { {name for name, _ in model.named_parameters()} }\n - Got: {initialized_parameters}"
+        assert initialized_parameters == {
+            param.get_tied_info().get_full_name_from_module_id_to_prefix(module_id_to_prefix=module_id_to_prefix)
+            if param.is_tied
+            else name
+            for name, param in model.named_parameters()
+        }, f"Somehow the initialized set of parameters don't match:\n - Expected: { {name for name, _ in model.named_parameters()} }\n - Got: {initialized_parameters}"
 
     def get_block_compute_costs(self):
         return self.model.get_block_compute_costs()
@@ -1101,13 +1106,11 @@ class VisionTransformerNanotron(NanotronModel):
     def get_embeddings_lm_head_tied_names(self):
         """Get the names of the tied embeddings and lm_head weights"""
         return []
-
-
+    
 @torch.jit.script
 def masked_mean(loss, label_mask, dtype):
     # type: (Tensor, Tensor, torch.dtype) -> Tensor
     return (loss * label_mask).sum(dtype=dtype) / label_mask.sum()
-
 
 class Loss(nn.Module):
     def __init__(self, tp_pg: dist.ProcessGroup):
@@ -1122,7 +1125,7 @@ class Loss(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         # Megatron by defaults cast everything in fp32. `--f16-lm-cross-entropy` is an option you can use to keep current precision.
         # https://github.com/NVIDIA/Megatron-LM/blob/f267e6186eae1d6e2055b412b00e2e545a8e896a/megatron/model/gpt_model.py#L38
-
+        
         loss = sharded_cross_entropy(
             sharded_logits, label_ids.transpose(0, 1).contiguous(), group=self.tp_pg, dtype=torch.float
         ).transpose(0, 1)
