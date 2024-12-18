@@ -30,17 +30,18 @@ def caption_to_messages(caption):
             "content": [
                 {"type": "image"},
                 {"type": "text", "text": "What do we see in this image?"},
-            ]
-        },     
+            ],
+        },
         {
             "role": "assistant",
             "content": [
                 {"type": "text", "text": "This image shows: " + caption},
-            ]
+            ],
         },
-    ]   
+    ]
 
-    return messages 
+    return messages
+
 
 def collate_fn(examples, processor):
     captions = [
@@ -48,7 +49,15 @@ def collate_fn(examples, processor):
     ]
     images = [[example["image"]] for example in examples]
 
-    inputs = processor(text=captions, images=images, return_tensors="pt", padding="longest", max_length=4096, truncation=True, padding_side="right")
+    inputs = processor(
+        text=captions,
+        images=images,
+        return_tensors="pt",
+        padding="longest",
+        max_length=4096,
+        truncation=True,
+        padding_side="right",
+    )
 
     input_ids = inputs["input_ids"][:, :-1]
     attention_mask = inputs["attention_mask"][:, :-1] == 1
@@ -56,7 +65,13 @@ def collate_fn(examples, processor):
     label_mask = label_ids < processor.tokenizer.vocab_size
     pixel_values = inputs["pixel_values"]
 
-    return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": label_ids, "label_mask": label_mask, "pixel_values": pixel_values}
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention_mask,
+        "labels": label_ids,
+        "label_mask": label_mask,
+        "pixel_values": pixel_values,
+    }
 
 
 def get_args():
@@ -75,7 +90,6 @@ def get_args():
 
 
 def main(args):
-
     model = AutoModelForVision2Seq.from_pretrained(
         args.pretrained_model_name_or_path,
         torch_dtype=TORCH_DTYPE,
@@ -83,14 +97,13 @@ def main(args):
         device_map="auto",
     ).eval()
 
-
-    dataset = load_dataset("jmhessel/newyorker_caption_contest", 'explanation', split="validation[:100]")
+    dataset = load_dataset("jmhessel/newyorker_caption_contest", "explanation", split="validation[:100]")
     processor = AutoProcessor.from_pretrained("HuggingFaceM4/Idefics3-8B-Llama3", size={"longest_edge": 2 * 364})
 
     dataloader = DataLoader(dataset, batch_size=16, num_workers=16, collate_fn=lambda x: collate_fn(x, processor))
 
     total_loss = 0
-    total_acc = 0 
+    total_acc = 0
 
     for batch in dataloader:
         inputs = {k: v.to(DEVICE) for k, v in batch.items()}
@@ -102,7 +115,7 @@ def main(args):
                 attention_mask=inputs["attention_mask"],
                 pixel_values=inputs["pixel_values"],
             )
-        
+
         logits = output[0]
         label_mask = inputs["label_mask"]
         labels = inputs["labels"]
@@ -116,7 +129,7 @@ def main(args):
 
     print(f"Average Loss: {total_loss / len(dataloader)}")
     print(f"Average Accuracy: {total_acc / len(dataloader)}")
-    
+
     # Average Loss: 2.1875
     # Average Accuracy: 0.6541961346353803
 
