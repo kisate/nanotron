@@ -596,7 +596,7 @@ class Idefics3SimpleMLP(nn.Module):
         hidden_size = config.vision_config.hidden_size
 
         self.input_size = hidden_size * (config.scale_factor ** 2)
-        self.output_size = config.llama_config.hidden_size
+        self.output_size = config.text_config.hidden_size
         self.proj = nn.Linear(
             self.input_size,
             self.output_size,
@@ -688,7 +688,7 @@ class CombinedEmbeddings(nn.Module):
         super().__init__()
         self.text_embeddings = LlamaEmbeddings(
             tp_pg=tp_pg,
-            config=config.llama_config,
+            config=config.text_config,
             parallel_config=parallel_config,
         )
 
@@ -782,7 +782,7 @@ class Idefics3Model(nn.Module):
         )
 
         self.llama = LlamaModel(
-            config=config.llama_config,
+            config=config.text_config,
             parallel_context=parallel_context,
             parallel_config=parallel_config,
             p2p = self.p2p
@@ -796,8 +796,8 @@ class Idefics3Model(nn.Module):
             # Understand that this means that we return sharded logits that are going to need to be gathered
             module_builder=TensorParallelColumnLinear,
             module_kwargs={
-                "in_features": config.llama_config.hidden_size,
-                "out_features": config.llama_config.vocab_size,
+                "in_features": config.text_config.hidden_size,
+                "out_features": config.text_config.vocab_size,
                 "pg": parallel_context.tp_pg,
                 "bias": False,
                 # TODO @thomasw21: refactor so that we store that default in a single place.
@@ -876,7 +876,7 @@ class Idefics3Model(nn.Module):
         costs = self.get_block_compute_costs_vision()
 
         costs[LlamaDecoderLayer] = llama_cost[LlamaDecoderLayer]
-        costs[TensorParallelColumnLinear] = self.config.llama_config.hidden_size * self.config.llama_config.vocab_size
+        costs[TensorParallelColumnLinear] = self.config.text_config.hidden_size * self.config.text_config.vocab_size
 
         return costs
     
@@ -1003,7 +1003,7 @@ class Idefics3ForTraining(NanotronModel):
 
     def get_embeddings_lm_head_tied_names(self):
         """Get the names of the tied embeddings and lm_head weights"""
-        if self.config.llama_config.tie_word_embeddings is True:
+        if self.config.text_config.tie_word_embeddings is True:
             return ["model.llama.token_position_embeddings.pp_block.token_embedding.weight", "model.llama.lm_head.pp_block.weight"]
         else:
             return []

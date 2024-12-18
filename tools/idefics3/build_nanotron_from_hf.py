@@ -34,7 +34,7 @@ TORCH_DTYPE = torch.bfloat16
 
 def copy_weights_from_hf_to_nanotron_llama(nanotron_model, hf_model, nanotron_config, 
     additional_vocab_size):
-    nanotron_llama_config = nanotron_config.llama_config
+    nanotron_llama_config = nanotron_config.text_config
     # Copy params from HF to Nanotron
     log_rank("Copying weights from HF model to Nanotron model...", logger=logger, level=logging.INFO, rank=0)
     # Token embeddings
@@ -430,7 +430,7 @@ def main(args):
         pad_token_id = 128002
 
     nanotron_idefics3_config = Idefics3Config(
-        llama_config=nanotron_llama_config,
+        text_config=nanotron_llama_config,
         vision_config=nanotron_vision_config,
         image_token_id=vocab_size + 1,
         pad_token_id=pad_token_id,

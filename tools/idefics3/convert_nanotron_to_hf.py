@@ -1,5 +1,5 @@
 """
-torchrun --nproc-per-node 1 tools/idefics3/convert_nanotron_to_hf.py --huggingface-checkpoint-path idefics3_ckpt --pretrained-model-name-or-path hf_ckpt_from_nanotron/Idefics3-8B --hf-pretrained-model-name-or-path /capstor/scratch/cscs/eguo/vlm_eval_infer/huggingface_cache/Idefics3_8B_Llama3
+torchrun --nproc-per-node 1 tools/idefics3/convert_nanotron_to_hf.py --huggingface-checkpoint-path idefics3_ckpt --pretrained-model-name-or-path nanotron-ckpt --hf-pretrained-model-name-or-path HuggingFaceM4/Idefics3-8B-Llama3
 """
 
 import sys
@@ -28,10 +28,11 @@ from nanotron.parallel.parameters import sanity_check
 from nanotron.serialize import load_weights
 from nanotron.serialize.weights import save_weights
 
-from transformers import AutoModelForVision2Seq, AutoTokenizer, AutoModel, AutoModelForCausalLM
+from transformers import AutoModelForVision2Seq, AutoTokenizer, AutoModel, AutoModelForCausalLM, AutoConfig
 from transformers.models.llama import LlamaConfig as LlamaConfigHF
 from transformers import Idefics3Config as Idefics3ConfigHF
-# from transformers import SigLIPConfig as SigLIPConfigHF
+from accelerate import init_empty_weights
+
 
 logger = logging.get_logger(__name__)
 
@@ -71,17 +72,6 @@ def get_args():
 def copy_weights_from_nanotron_to_hf_llama(nanotron_model, hf_model, nanotron_llama_config, additional_vocab_size):
     # Copy params from Nanotron to HF
     log_rank("Copying weights from Nanotron model to HF model...", logger=logger, level=logging.INFO, rank=0)
-
-    # Token embeddings
-    log_rank("Copying Token Embeddings...", logger=logger, level=logging.INFO, rank=0)
-    assert (
-        nanotron_model.token_position_embeddings.pp_block.token_embedding.weight[:-additional_vocab_size].shape
-        == hf_model.embed_tokens.weight.shape
-    )
-    with torch.no_grad():
-        hf_model.embed_tokens.weight.copy_(
-            nanotron_model.token_position_embeddings.pp_block.token_embedding.weight[:-additional_vocab_size]
-        )
 
     # Decoder layers
     for i in tqdm(
@@ -164,13 +154,7 @@ def copy_weights_from_nanotron_to_hf_llama(nanotron_model, hf_model, nanotron_ll
     with torch.no_grad():
         hf_model.norm.weight.copy_(nanotron_model.final_layer_norm.pp_block.weight)
 
-    # LM Head
-#     log_rank("Copying LM Head...", logger=logger, level=logging.INFO, rank=0)
-#     assert nanotron_model.lm_head.pp_block.weight.shape == hf_model.lm_head.weight.shape
-#     with torch.no_grad():
-#         hf_model.lm_head.weight.copy_(nanotron_model.lm_head.pp_block.weight)
-
-    log_rank("Weight copying completed successfully!", logger=logger, level=logging.INFO, rank=0)
+    log_rank("Llama weight copying completed successfully!", logger=logger, level=logging.INFO, rank=0)
 
 
 def copy_weights_from_nanotron_to_hf_vision(
@@ -184,25 +168,25 @@ def copy_weights_from_nanotron_to_hf_vision(
     log_rank("Copying Vision Embeddings...", logger=logger, level=logging.INFO, rank=0)
 
     assert (
-        nanotron_model.embeddings.pp_block.patch_embedding.weight.shape == hf_model.embeddings.patch_embedding.weight.shape
+        nanotron_model.embeddings.patch_embedding.weight.shape == hf_model.embeddings.patch_embedding.weight.shape
     )
     assert (
-        nanotron_model.embeddings.pp_block.patch_embedding.bias.shape == hf_model.embeddings.patch_embedding.bias.shape
+        nanotron_model.embeddings.patch_embedding.bias.shape == hf_model.embeddings.patch_embedding.bias.shape
     )
     assert (
-        nanotron_model.embeddings.pp_block.position_embedding.weight.shape
+        nanotron_model.embeddings.position_embedding.weight.shape
         == hf_model.embeddings.position_embedding.weight.shape
     )
 
     with torch.no_grad():
         hf_model.embeddings.patch_embedding.weight.copy_(
-            nanotron_model.embeddings.pp_block.patch_embedding.weight
+            nanotron_model.embeddings.patch_embedding.weight
         )
         hf_model.embeddings.patch_embedding.bias.copy_(
-            nanotron_model.embeddings.pp_block.patch_embedding.bias
+            nanotron_model.embeddings.patch_embedding.bias
         )
         hf_model.embeddings.position_embedding.weight.copy_(
-            nanotron_model.embeddings.pp_block.position_embedding.weight
+            nanotron_model.embeddings.position_embedding.weight
         )
 
     log_rank("Copied Vision Embeddings", logger=logger, level=logging.INFO, rank=0)
@@ -214,22 +198,22 @@ def copy_weights_from_nanotron_to_hf_vision(
     ):
         # Layer Norm 1
         assert (
-            nanotron_model.encoder[i].pp_block.layer_norm1.weight.shape == hf_model.encoder.layers[i].layer_norm1.weight.shape
+            nanotron_model.encoder[i].layer_norm1.weight.shape == hf_model.encoder.layers[i].layer_norm1.weight.shape
         )
         assert (
-            nanotron_model.encoder[i].pp_block.layer_norm1.bias.shape == hf_model.encoder.layers[i].layer_norm1.bias.shape
+            nanotron_model.encoder[i].layer_norm1.bias.shape == hf_model.encoder.layers[i].layer_norm1.bias.shape
         )
 
         with torch.no_grad():
             hf_model.encoder.layers[i].layer_norm1.weight.copy_(
-                nanotron_model.encoder[i].pp_block.layer_norm1.weight
+                nanotron_model.encoder[i].layer_norm1.weight
             )
             hf_model.encoder.layers[i].layer_norm1.bias.copy_(
-                nanotron_model.encoder[i].pp_block.layer_norm1.bias
+                nanotron_model.encoder[i].layer_norm1.bias
             )
 
         # QKV Projections
-        tmp_qkv_proj = nanotron_model.encoder[i].pp_block.self_attn.qkv_proj.weight.chunk(3, dim=0)
+        tmp_qkv_proj = nanotron_model.encoder[i].self_attn.qkv_proj.weight.chunk(3, dim=0)
 
         assert (
             tmp_qkv_proj[0].shape == hf_model.encoder.layers[i].self_attn.q_proj.weight.shape
@@ -247,7 +231,7 @@ def copy_weights_from_nanotron_to_hf_vision(
             hf_model.encoder.layers[i].self_attn.v_proj.weight.copy_(tmp_qkv_proj[2])
 
         # QKV Biases
-        tmp_qkv_proj_bias = nanotron_model.encoder[i].pp_block.self_attn.qkv_proj.bias.chunk(3, dim=0)
+        tmp_qkv_proj_bias = nanotron_model.encoder[i].self_attn.qkv_proj.bias.chunk(3, dim=0)
 
         assert (
             tmp_qkv_proj_bias[0].shape == hf_model.encoder.layers[i].self_attn.q_proj.bias.shape
@@ -266,103 +250,123 @@ def copy_weights_from_nanotron_to_hf_vision(
 
         # Output Projection
         assert (
-            nanotron_model.encoder[i].pp_block.self_attn.o_proj.weight.shape == hf_model.encoder.layers[i].self_attn.out_proj.weight.shape
+            nanotron_model.encoder[i].self_attn.o_proj.weight.shape == hf_model.encoder.layers[i].self_attn.out_proj.weight.shape
         )
         assert (
-            nanotron_model.encoder[i].pp_block.self_attn.o_proj.bias.shape == hf_model.encoder.layers[i].self_attn.out_proj.bias.shape
+            nanotron_model.encoder[i].self_attn.o_proj.bias.shape == hf_model.encoder.layers[i].self_attn.out_proj.bias.shape
         )
 
         with torch.no_grad():
             hf_model.encoder.layers[i].self_attn.out_proj.weight.copy_(
-                nanotron_model.encoder[i].pp_block.self_attn.o_proj.weight
+                nanotron_model.encoder[i].self_attn.o_proj.weight
             )
             hf_model.encoder.layers[i].self_attn.out_proj.bias.copy_(
-                nanotron_model.encoder[i].pp_block.self_attn.o_proj.bias
+                nanotron_model.encoder[i].self_attn.o_proj.bias
             )
 
         # Layer Norm 2
         assert (
-            nanotron_model.encoder[i].pp_block.layer_norm2.weight.shape == hf_model.encoder.layers[i].layer_norm2.weight.shape
+            nanotron_model.encoder[i].layer_norm2.weight.shape == hf_model.encoder.layers[i].layer_norm2.weight.shape
         )
         assert (
-            nanotron_model.encoder[i].pp_block.layer_norm2.bias.shape == hf_model.encoder.layers[i].layer_norm2.bias.shape
+            nanotron_model.encoder[i].layer_norm2.bias.shape == hf_model.encoder.layers[i].layer_norm2.bias.shape
         )
 
         with torch.no_grad():
             hf_model.encoder.layers[i].layer_norm2.weight.copy_(
-                nanotron_model.encoder[i].pp_block.layer_norm2.weight
+                nanotron_model.encoder[i].layer_norm2.weight
             )
             hf_model.encoder.layers[i].layer_norm2.bias.copy_(
-                nanotron_model.encoder[i].pp_block.layer_norm2.bias
+                nanotron_model.encoder[i].layer_norm2.bias
             )
 
         # MLP Layers
         assert (
-            nanotron_model.encoder[i].pp_block.mlp.fc1.weight.shape == hf_model.encoder.layers[i].mlp.fc1.weight.shape
+            nanotron_model.encoder[i].mlp.fc1.weight.shape == hf_model.encoder.layers[i].mlp.fc1.weight.shape
         )
         assert (
-            nanotron_model.encoder[i].pp_block.mlp.fc1.bias.shape == hf_model.encoder.layers[i].mlp.fc1.bias.shape
+            nanotron_model.encoder[i].mlp.fc1.bias.shape == hf_model.encoder.layers[i].mlp.fc1.bias.shape
         )
 
         with torch.no_grad():
             hf_model.encoder.layers[i].mlp.fc1.weight.copy_(
-                nanotron_model.encoder[i].pp_block.mlp.fc1.weight
+                nanotron_model.encoder[i].mlp.fc1.weight
             )
             hf_model.encoder.layers[i].mlp.fc1.bias.copy_(
-                nanotron_model.encoder[i].pp_block.mlp.fc1.bias
+                nanotron_model.encoder[i].mlp.fc1.bias
             )
 
         assert (
-            nanotron_model.encoder[i].pp_block.mlp.fc2.weight.shape == hf_model.encoder.layers[i].mlp.fc2.weight.shape
+            nanotron_model.encoder[i].mlp.fc2.weight.shape == hf_model.encoder.layers[i].mlp.fc2.weight.shape
         )
         assert (
-            nanotron_model.encoder[i].pp_block.mlp.fc2.bias.shape == hf_model.encoder.layers[i].mlp.fc2.bias.shape
+            nanotron_model.encoder[i].mlp.fc2.bias.shape == hf_model.encoder.layers[i].mlp.fc2.bias.shape
         )
 
         with torch.no_grad():
             hf_model.encoder.layers[i].mlp.fc2.weight.copy_(
-                nanotron_model.encoder[i].pp_block.mlp.fc2.weight
+                nanotron_model.encoder[i].mlp.fc2.weight
             )
             hf_model.encoder.layers[i].mlp.fc2.bias.copy_(
-                nanotron_model.encoder[i].pp_block.mlp.fc2.bias
+                nanotron_model.encoder[i].mlp.fc2.bias
             )
 
     log_rank("Copied Vision Layers", logger=logger, level=logging.INFO, rank=0)
 
     # Post Layer Norm
     assert (
-        nanotron_model.post_layernorm.pp_block.weight.shape == hf_model.post_layernorm.weight.shape
+        nanotron_model.post_layernorm.weight.shape == hf_model.post_layernorm.weight.shape
     )
     assert (
-        nanotron_model.post_layernorm.pp_block.bias.shape == hf_model.post_layernorm.bias.shape
+        nanotron_model.post_layernorm.bias.shape == hf_model.post_layernorm.bias.shape
     )
 
     with torch.no_grad():
-        hf_model.post_layernorm.weight.copy_(nanotron_model.post_layernorm.pp_block.weight)
-        hf_model.post_layernorm.bias.copy_(nanotron_model.post_layernorm.pp_block.bias)
+        hf_model.post_layernorm.weight.copy_(nanotron_model.post_layernorm.weight)
+        hf_model.post_layernorm.bias.copy_(nanotron_model.post_layernorm.bias)
 
     log_rank("Copied Post Layer Norm", logger=logger, level=logging.INFO, rank=0)
 
-def copy_weights_from_nanotron_to_hf_connector(
+def copy_weights_from_nanotron_to_hf_remaining(
     nanotron_model: Idefics3Model,
     hf_model: AutoModel,
     nanotron_config: Idefics3Config
 ):
-    log_rank("Copying weights from Nanotron model to Idefic3 Connector...", logger=logger, level=logging.INFO, rank=0)
-    # Ensure that the shapes of the modality projection weights match
-    print(hf_model.connector.modality_projection.proj.weight.shape)
-    assert (
-        nanotron_model.connector.modality_projector.pp_block.proj.weight.shape
-        == hf_model.connector.modality_projection.proj.weight.shape
-    ), "Shape mismatch between Nanotron and HF models' modality projection weights"
+    log_rank("Copying weights from Idefic3 Llama embeddings to Nanotron model...", logger=logger, level=logging.INFO, rank=0)
 
-    # Copy weights from Nanotron model to HF model
+    hf_vocab_size = hf_model.model.text_model.config.vocab_size
+
+    assert (
+        nanotron_model.combined_embeddings.pp_block.text_embeddings.token_embedding.weight[:hf_vocab_size].shape
+        == hf_model.model.text_model.embed_tokens.weight.shape
+    )
     with torch.no_grad():
-        hf_model.connector.modality_projection.proj.weight.copy_(
-            nanotron_model.connector.modality_projector.pp_block.proj.weight
+        hf_model.model.text_model.embed_tokens.weight.copy_(
+            nanotron_model.combined_embeddings.pp_block.text_embeddings.token_embedding.weight[:hf_vocab_size]
         )
 
-    log_rank("Copied Connector weights", logger=logger, level=logging.INFO, rank=0)
+    log_rank("Copying weights from Idefic3 Connector to Nanotron model...", logger=logger, level=logging.INFO, rank=0)
+
+    assert (
+        nanotron_model.combined_embeddings.pp_block.connector.modality_projector.proj.weight.shape == hf_model.model.connector.modality_projection.proj.weight.shape
+    )
+
+    with torch.no_grad():
+        hf_model.model.connector.modality_projection.proj.weight.copy_(nanotron_model.combined_embeddings.pp_block.connector.modality_projector.proj.weight)
+
+    log_rank("Copied Connector", logger=logger, level=logging.INFO, rank=0)
+
+    vocab_size = hf_model.vocab_size
+
+    assert (
+        nanotron_model.lm_head.pp_block.weight[:vocab_size].shape == hf_model.lm_head.weight.shape
+    )
+
+    with torch.no_grad():
+        hf_model.lm_head.weight.copy_(nanotron_model.lm_head.pp_block.weight[:vocab_size])
+        
+    log_rank("Copied Head", logger=logger, level=logging.INFO, rank=0)
+
 
 def main(args):
     # Init Nanotron Parallel Utilities
@@ -389,7 +393,7 @@ def main(args):
         os.path.join(args.pretrained_model_name_or_path, "config.yaml"), config_class=Config, model_config_class=None
     )
     nanotron_idefics3_config = nanotron_config.model.model_config
-    nanotron_llama_config = nanotron_idefics3_config.llama_config
+    nanotron_llama_config = nanotron_idefics3_config.text_config
     nanotron_vision_config = nanotron_idefics3_config.vision_config
 
 
@@ -410,13 +414,13 @@ def main(args):
     mark_tied_parameters(model=nanotron_model, parallel_context=parallel_context)
     sanity_check(root_module=nanotron_model)
 
-    # Load Nanotron Checkpoint
+    # # Load Nanotron Checkpoint
     log_rank("Loading Nanotron Idefics3 Model...", logger=logger, level=logging.INFO, rank=0)
     load_weights(
         model=nanotron_model, parallel_context=parallel_context, root_folder=Path(args.pretrained_model_name_or_path)
     )
 
-    # # Build empty HF Model
+    # Build empty HF Model
     # log_rank("Init empty HF Llama3 Model", logger=logger, level=logging.INFO, rank=0)
 
     # hf_llama_model = AutoModelForCausalLM.from_config(  # WARN This takes a long time
@@ -432,30 +436,35 @@ def main(args):
     #     attn_implementation="flash_attention_2",
     # ).to(DEVICE)
 
+
     log_rank("Init empty HF Idefics3 Model", logger=logger, level=logging.INFO, rank=0)
-    # hf_idefics3_model = AutoModel.from_config(
-    #     config=Idefics3ConfigHF(**asdict(nanotron_idefics3_config)),
-    #     torch_dtype=TORCH_DTYPE,
-    #     attn_implementation="flash_attention_2",
+
+    with init_empty_weights():
+        hf_idefics3_model = AutoModelForVision2Seq.from_config(
+            config=Idefics3ConfigHF(**asdict(nanotron_idefics3_config)),
+            torch_dtype=TORCH_DTYPE,
+            attn_implementation="flash_attention_2",
+        ).to_empty(device=DEVICE)
+
+
+
+    # hf_idefics3_model = AutoModelForVision2Seq.from_pretrained(
+    #     args.hf_pretrained_model_name_or_path, torch_dtype=TORCH_DTYPE, attn_implementation="flash_attention_2"
     # ).to(DEVICE)
-    hf_idefics3_model = AutoModelForVision2Seq.from_pretrained(
-        args.hf_pretrained_model_name_or_path, torch_dtype=TORCH_DTYPE, attn_implementation="flash_attention_2"
-    ).to(DEVICE)
 
     # Copy weights from Nanotron to Hugging Face
     copy_weights_from_nanotron_to_hf_llama(
         nanotron_model=nanotron_model.model.llama,
         # hf_model=hf_llama_model,
         hf_model=hf_idefics3_model.model.text_model,
-        nanotron_llama_config=nanotron_llama_config,
-        # parallel_context=parallel_context,
+        nanotron_llama_config=nanotron_idefics3_config.text_config,
         additional_vocab_size=additional_vocab_size,
     )
 
     log_rank("Copied weights from Nanotron Llama model to HF model!", logger=logger, level=logging.INFO, rank=0)
 
     copy_weights_from_nanotron_to_hf_vision(
-        nanotron_model=nanotron_model.model.vision_model,
+        nanotron_model=nanotron_model.model.combined_embeddings.pp_block.vision_model,
         # hf_model=hf_siglip_model,
         hf_model=hf_idefics3_model.model.vision_model,
         nanotron_vision_config=nanotron_vision_config,
@@ -463,9 +472,9 @@ def main(args):
 
     log_rank("Copied weights from Nanotron SigLIP model to HF model!", logger=logger, level=logging.INFO, rank=0)
 
-    copy_weights_from_nanotron_to_hf_connector(
+    copy_weights_from_nanotron_to_hf_remaining(
         nanotron_model=nanotron_model.model,
-        hf_model=hf_idefics3_model.model,
+        hf_model=hf_idefics3_model,
         nanotron_config=nanotron_idefics3_config,
     )
 
