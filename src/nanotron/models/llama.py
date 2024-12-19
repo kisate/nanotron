@@ -676,11 +676,15 @@ class LlamaModel(nn.Module):
         config: LlamaConfig,
         parallel_context: ParallelContext,
         parallel_config: Optional[ParallelismArgs],
+        p2p: Optional[P2P] = None
     ):
         super().__init__()
 
         # Declare all the nodes
-        self.p2p = P2P(parallel_context.pp_pg, device=torch.device("cuda"))
+        if p2p is None:
+            p2p = P2P(parallel_context.pp_pg, device=torch.device("cuda"))
+    
+        self.p2p = p2p
         self.config = config
         self.parallel_config = parallel_config
         self.parallel_context = parallel_context
@@ -764,12 +768,10 @@ class LlamaModel(nn.Module):
         self,
         input_ids: Union[torch.Tensor, TensorPointer],  # [batch_size, seq_length]
         input_mask: Union[torch.Tensor, TensorPointer],  # [batch_size, seq_length]
-        input_embeds: Optional[torch.Tensor] = None,  # [seq_length, batch_size, hidden_size]
     ):
         # all tensors are optional as most ranks don't need anything from the dataloader.
 
-        if input_embeds is None:
-            input_embeds = self.token_position_embeddings(input_ids=input_ids, input_mask=input_mask)["input_embeds"]
+        input_embeds = self.token_position_embeddings(input_ids=input_ids, input_mask=input_mask)["input_embeds"]
 
         hidden_encoder_states = {
             "hidden_states": input_embeds,
@@ -779,7 +781,7 @@ class LlamaModel(nn.Module):
             hidden_encoder_states = encoder_block(**hidden_encoder_states)
 
         hidden_states = self.final_layer_norm(input=hidden_encoder_states["hidden_states"])["hidden_states"]
-
+    
         sharded_logits = self.lm_head(x=hidden_states)["logits"]
 
         fp32_sharded_logits = self.cast_to_fp32(x=sharded_logits)["output"]

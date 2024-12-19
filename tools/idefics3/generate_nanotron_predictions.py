@@ -1,5 +1,5 @@
 """
-torchrun --nproc-per-node 2 tools/Idefics3/generate_nanotron_predictions.py --tp 2 --nanotron-checkpoint-path nanotron-ckpt
+torchrun --nproc-per-node 2 tools/idefics3/generate_nanotron_predictions.py --tp 2 --nanotron-checkpoint-path nanotron_checkpoints/Nanotron-Idefics3-8B-Llama3
 """
 import argparse
 import os
@@ -20,7 +20,7 @@ from nanotron.parallel.tensor_parallel.nn import TensorParallelLinearMode
 from nanotron.serialize import load_weights
 from nanotron.trainer import mark_tied_parameters
 # from sklearn.metrics import accuracy_score
-from transformers import AutoTokenizer, Idefics3Processor
+from transformers import AutoTokenizer, AutoProcessor
 from PIL import Image
 
 
@@ -105,6 +105,9 @@ def main(args):
         device=DEVICE,  # TODO Check with different parallelism if cpu is available
     )
 
+    
+    #torch.Size([484, 26, 768])
+
     mark_tied_parameters(model=model, parallel_context=parallel_context)
     sanity_check(root_module=model)
 
@@ -116,18 +119,18 @@ def main(args):
     image_2 = Image.open(requests.get(url_2, stream=True).raw)
     images = [image_1, image_2]
 
-    processor = Idefics3Processor.from_pretrained("HuggingFaceM4/Idefics3-8b")
+    # Using non-Idefics3 image size may break the pixel shuffle
+    # For example, instead of 384 you should use either 364 or 404
+    image_size = nanotron_config.model.model_config.vision_config.image_size
+    
+    image_size = 364
 
-    text = processor.apply_chat_template(messages, add_generation_prompt=False)
-    inputs = processor(images=images, text=text, return_tensors="pt").to(DEVICE)
+    target_image_seq_len = int(((image_size // nanotron_config.model.model_config.vision_config.patch_size) ** 2) / (nanotron_config.model.model_config.scale_factor**2))
 
-    # labels = inputs.input_ids.clone()
-    # labels[labels == processor.tokenizer.pad_token_id] = -100
-    # labels[labels == model.config.image_token_id] = -100
+    processor = AutoProcessor.from_pretrained("HuggingFaceM4/Idefics3-8B-Llama3", image_seq_len=target_image_seq_len, size= {"longest_edge": 4*image_size}, max_image_size = {"longest_edge": image_size})
 
-    seq_length = inputs.input_ids.size(1)
-
-    print(inputs.keys())
+    text = processor.apply_chat_template(messages, add_generation_prompt=True)
+    inputs = processor(images=images, text=text, return_tensors="pt", image_seq_len=target_image_seq_len).to(DEVICE)
 
     inputs = {
         "input_ids": inputs['input_ids'],
@@ -142,6 +145,8 @@ def main(args):
         output = model.model(**inputs)
 
     if not RANK:
+        print(output.shape)
+
         predicted_tokens = [5, 27, 34]  # Index of the predictions to compare across models
         term_cols = int(os.get_terminal_size().columns / 3)
 
@@ -149,6 +154,7 @@ def main(args):
 
             print("\n", "=" * term_cols, f"Predictions of token {predicted_token}", "=" * term_cols)
             next_tokens = torch.softmax(output.transpose(0, 1)[0, predicted_token, :], -1)
+            
             topk_next_tokens = torch.topk(next_tokens, 10)
 
             print(
@@ -158,16 +164,6 @@ def main(args):
                 ],
                 sep="\n",
             )
-
-        # Compute accuracy
-        predictions = np.argmax(output.transpose(0, 1).cpu(), axis=2).flatten().tolist()
-        labels = tokens.cpu().flatten()[1:].tolist()
-        print(f"\nAccuracy: {accuracy_score(labels, predictions)}")
-        # Results
-        ## Nanotron 8B, TP 1: 0.8272058823529411
-        ## Nanotron 8B, TP 2: 0.7720588235294118
-        ## Nanotron 70B, TP 2: 0.8272058823529411
-
 
 if __name__ == "__main__":
     _args = get_args()

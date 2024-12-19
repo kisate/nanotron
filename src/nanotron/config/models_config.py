@@ -33,7 +33,7 @@ class LlamaConfig:
     """
 
     bos_token_id: int = 1
-    eos_token_id: int = 2
+    eos_token_id: Union[int, List[int]] = 2
     hidden_act: str = "silu"
     hidden_size: int = 4096
     initializer_range: float = 0.02
@@ -161,10 +161,12 @@ class Idefics3Config:
     Be careful on having a coherent typing as we use it to reconstruct the model from yaml
     """
     vision_config: Idefics3VisionConfig
-    llama_config: LlamaConfig
+    text_config: LlamaConfig
 
-    image_token_id: int = 32001
+    image_token_id: int = 128257
+    pad_token_id: int = 128_002
     scale_factor: int = 2
+    vocab_size: int = 128260
 
 
 NanotronConfigs = Union[LlamaConfig, Starcoder2Config, Idefics3Config, Idefics3VisionConfig]
