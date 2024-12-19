@@ -8,24 +8,26 @@ torchrun --nproc_per_node=8 run_train.py --config-file examples/config_tiny_llam
 ```
 """
 import argparse
+import datasets
 from typing import Dict, cast
 
 import numpy as np
 from nanotron import logging
 from nanotron.config import DataArgs, DatasetStageArgs, NanosetDatasetsArgs, PretrainDatasetsArgs
+from nanotron.config.config import ImageDatasetsArgs
 from nanotron.data.dataloader_builder import build_nanoset_dataloader
 from nanotron.dataloader import (
     clm_process,
     dummy_infinite_data_generator,
     get_datasets,
     get_train_dataloader,
-    vqa_process,
 )
 from nanotron.helpers import (
     compute_remain_train_steps_of_a_data_stage_from_ckp,
     get_consumed_train_samples_of_a_data_stage_from_ckp,
 )
 from nanotron.logging import log_rank
+from nanotron.modular_dataloader import BATCH_ENCODERS, SAMPLE_ENCODERS
 from nanotron.parallel.pipeline_parallel.utils import get_input_output_pp_ranks
 from nanotron.trainer import DistributedTrainer
 from nanotron.utils import main_rank_first
@@ -47,7 +49,6 @@ def get_dataloader_from_data_stage(
     data: DataArgs,
     consumed_train_samples: int,
     num_remaining_train_steps: int,
-    vqa=False
 ):
     """
     Returns a dataloader for a given data stage.
@@ -99,35 +100,25 @@ def get_dataloader_from_data_stage(
             )["train"]
 
 
-            if vqa:
-                processor = AutoProcessor.from_pretrained(tokenizer_path)
-                train_dataset = vqa_process(
-                    raw_dataset=raw_dataset,
-                    processor=processor,
-                    dataset_processing_num_proc_per_process=data.dataset.dataset_processing_num_proc_per_process,
-                    dataset_overwrite_cache=data.dataset.dataset_overwrite_cache,
-                    sequence_length=trainer.sequence_length,
-                )
 
-            else:
-                tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-                tokenizer.pad_token = tokenizer.eos_token
-                tokenizer.padding_side = "left"
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+            tokenizer.pad_token = tokenizer.eos_token
+            tokenizer.padding_side = "left"
 
-                # Check that tokenizer's vocab size is smaller than the model's vocab size
-                assert (
-                    tokenizer.vocab_size <= trainer.model_config.vocab_size
-                ), f"Tokenizer's vocab size ({tokenizer.vocab_size}) is larger than the model's vocab size ({trainer.model_config.vocab_size})"
+            # Check that tokenizer's vocab size is smaller than the model's vocab size
+            assert (
+                tokenizer.vocab_size <= trainer.model_config.vocab_size
+            ), f"Tokenizer's vocab size ({tokenizer.vocab_size}) is larger than the model's vocab size ({trainer.model_config.vocab_size})"
 
-                # We apply the Causal Language Modeling preprocessing
-                train_dataset = clm_process(
-                    raw_dataset=raw_dataset,
-                    tokenizer=tokenizer,
-                    text_column_name=data.dataset.text_column_name,
-                    dataset_processing_num_proc_per_process=data.dataset.dataset_processing_num_proc_per_process,
-                    dataset_overwrite_cache=data.dataset.dataset_overwrite_cache,
-                    sequence_length=trainer.sequence_length,
-                )
+            # We apply the Causal Language Modeling preprocessing
+            train_dataset = clm_process(
+                raw_dataset=raw_dataset,
+                tokenizer=tokenizer,
+                text_column_name=data.dataset.text_column_name,
+                dataset_processing_num_proc_per_process=data.dataset.dataset_processing_num_proc_per_process,
+                dataset_overwrite_cache=data.dataset.dataset_overwrite_cache,
+                sequence_length=trainer.sequence_length,
+            )
 
             # We load the processed dataset on the ranks requiring it
             dataloader = get_train_dataloader(
@@ -141,7 +132,7 @@ def get_dataloader_from_data_stage(
                 dataloader_num_workers=data.num_loading_workers,
                 seed_worker=data.seed,
                 dataloader_drop_last=True,
-                dataset_columns=["input_ids", "pixel_values"]
+                dataset_columns=["input_ids"]
             )
 
             # Check if we have enough samples for train_steps
@@ -187,6 +178,60 @@ def get_dataloader_from_data_stage(
         )
 
         return train_dataloader
+    
+    elif isinstance(data.dataset, ImageDatasetsArgs):
+        log_rank("Using iterable dataset from `datasets` library", logger=logger, level=logging.INFO, rank=0)
+        tokenizer_path = trainer.config.tokenizer.tokenizer_name_or_path
+        log_rank(
+            f"Loading tokenizer from {tokenizer_path} with HF version {hf_hub_version} and Transformers version {tf_version}",
+            logger=logger,
+            level=logging.INFO,
+            rank=0,
+        )
+
+        dataset = datasets.load_dataset(
+            data.dataset.hf_dataset_name_or_type,
+            data_dir=data.dataset.hf_dataset_data_dir,
+            split=data.dataset.hf_dataset_splits,
+            streaming=True
+        )
+
+        processor = AutoProcessor.from_pretrained(
+            tokenizer_path,
+            size={"longest_edge": data.dataset.image_size * data.dataset.image_scale_factor},
+        )
+
+        sample_encoder = SAMPLE_ENCODERS[data.dataset.sample_encoder](
+            processor=processor,
+            sequence_length=trainer.sequence_length,
+            **data.dataset.sample_encoder_args
+        )
+
+        batch_encoder = BATCH_ENCODERS[data.dataset.batch_encoder](
+            input_pp_rank=input_pp_rank,
+            output_pp_rank=output_pp_rank,
+            parallel_context=trainer.parallel_context,
+            processor=processor,
+            sequence_length=trainer.sequence_length,
+            **data.dataset.batch_encoder_args
+        )
+
+        dataloader = get_train_dataloader(
+            train_dataset=dataset,
+            sample_encoder=sample_encoder,
+            batch_encoder=batch_encoder,
+            parallel_context=trainer.parallel_context,
+            input_pp_rank=input_pp_rank,
+            output_pp_rank=output_pp_rank,
+            micro_batch_size=trainer.micro_batch_size,
+            sample_encoding_batch=data.dataset.sample_encoding_batch,
+            batch_encoding_batch=data.dataset.batch_encoding_batch,
+            seed_worker=data.seed,
+            sample_encoding_workers=data.dataset.sample_encoding_workers,
+            batch_encoding_workers=data.dataset.batch_encoding_workers,
+            consumed_train_samples=consumed_train_samples,
+            drop_last=True,
+        )
     else:
         raise ValueError(f"Unhandled case of `self.config.data.dataset`. Got: {data.dataset}")
 

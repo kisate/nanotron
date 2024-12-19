@@ -15,7 +15,8 @@ import argparse
 from typing import Dict, cast
 
 import datasets
-import numpy as np
+from torch.utils.data import DataLoader
+
 from nanotron import logging
 from nanotron.config import (
     DataArgs,
@@ -24,18 +25,14 @@ from nanotron.config import (
 from nanotron.config.config import ImageDatasetsArgs
 from nanotron.helpers import get_consumed_train_samples_of_a_data_stage_from_ckp
 from nanotron.logging import log_rank
+from nanotron.modular_dataloader import BATCH_ENCODERS, SAMPLE_ENCODERS
+from nanotron.modular_dataloader.iterable import get_train_dataloader
 from nanotron.parallel.pipeline_parallel.utils import get_input_output_pp_ranks
 from nanotron.trainer import DistributedTrainer
-from nanotron.modular_dataloader.iterable import get_train_dataloader
-from nanotron.modular_dataloader import SAMPLE_ENCODERS, BATCH_ENCODERS
-from torchdata.stateful_dataloader import StatefulDataLoader
-
-
 
 try:
     from huggingface_hub import __version__ as hf_hub_version
-    from transformers import AutoTokenizer
-    from transformers import AutoProcessor
+    from transformers import AutoProcessor, AutoTokenizer
     from transformers import __version__ as tf_version
 except ImportError:
     hf_hub_version = None
@@ -78,7 +75,7 @@ def get_dataloader_from_data_stage(
         processor = AutoProcessor.from_pretrained(
             tokenizer_path,
             size={"longest_edge": data.dataset.image_size * data.dataset.image_scale_factor},
-        ) 
+        )
 
         sample_encoder = SAMPLE_ENCODERS[data.dataset.sample_encoder](
             processor=processor,
@@ -117,7 +114,7 @@ def get_dataloader_from_data_stage(
     return dataloader
 
 
-def get_dataloader(trainer: DistributedTrainer) -> Dict[str, StatefulDataLoader]:
+def get_dataloader(trainer: DistributedTrainer) -> Dict[str, DataLoader]:
     dataloaders = {}
 
     for stage_idx, stage in enumerate(trainer.config.data_stages):
@@ -125,7 +122,7 @@ def get_dataloader(trainer: DistributedTrainer) -> Dict[str, StatefulDataLoader]
         # then we lazy initialize the dataloader for the other stages
         stage = cast(DatasetStageArgs, stage)
         consumed_train_samples = get_consumed_train_samples_of_a_data_stage_from_ckp(stage, trainer.metadata)
-        
+
         log_rank(
             f"[Training Plan] Stage {stage.name}",
             logger=logger,
@@ -163,21 +160,6 @@ if __name__ == "__main__":
     # Load trainer and data
     trainer = DistributedTrainer(config_file)
     dataloader = get_dataloader(trainer)
-
-    import time
-    start = time.time()
-    c = 0
-
-    all_times = []
-
-    # for i in dataloader['Stable Training Stage']:
-        # c += 1
-        # end = time.time()
-        # all_times.append(end - start)
-        # print(f"{c} Time: {end - start}, Average: {sum(all_times) / len(all_times)}")
-        # start = end
-        # if c == 100:
-        #     break
 
     # Train
     trainer.train(dataloader)
