@@ -116,15 +116,15 @@ optimizer:
 parallelism:
   dp: 1
   expert_parallel_size: 1
-  pp: 4
+  pp: 1
   pp_engine: afab
-  tp: 1
+  tp: 2
   tp_linear_async_communication: true
   tp_mode: REDUCE_SCATTER
 profiler: null
 tokenizer:
   tokenizer_max_length: null
-  tokenizer_name_or_path: hf_idefics3_processor
+  tokenizer_name_or_path: "HuggingFaceM4/Idefics3-8B-Llama3"
   tokenizer_revision: null
 tokens:
   batch_accumulation_per_replica: 1
