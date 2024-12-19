@@ -42,13 +42,19 @@ def caption_to_messages(caption):
 
     return messages 
 
+def check_image(image):
+    image = np.array(image)
+    if image.ndim == 2:
+        image = image[:, :, None]
+    return image
+
 def collate_fn(examples, processor):
     captions = [
         processor.apply_chat_template(caption_to_messages(example["image_description"])) for example in examples
     ]
-    images = [[example["image"]] for example in examples]
+    images = [[check_image(example["image"])] for example in examples]
 
-    inputs = processor(text=captions, images=images, return_tensors="pt", padding="longest", max_length=4096, truncation=True, padding_side="right")
+    inputs = processor(text=captions, images=images, return_tensors="pt", padding="max_length", max_length=2049, truncation=True, padding_side="right")
 
     input_ids = inputs["input_ids"][:, :-1]
     attention_mask = inputs["attention_mask"][:, :-1] == 1

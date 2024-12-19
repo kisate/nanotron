@@ -837,8 +837,6 @@ class Idefics3Model(nn.Module):
             "sequence_mask": embeds["input_mask"],
         }
         
-        logger.info(f"I'm here")
-
         for encoder_block in self.llama.decoder:
             hidden_encoder_states = encoder_block(**hidden_encoder_states)
 

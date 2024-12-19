@@ -57,14 +57,6 @@ def get_args():
         help="A path to a directory containing model weights saved using save_pretrained() or the model id of a pretrained model hosted inside a model repo in nanotron",
     )
 
-    group = parser.add_argument_group(title="HuggingFace Idefic3 Model")
-    group.add_argument(
-        "--hf-pretrained-model-name-or-path",
-        type=str,
-        required=True,
-        help="A path to a directory containing model weights saved using save_pretrained() or the model id of a pretrained model hosted inside a model repo on the Hugging Face Hub",
-    )
-
     args = parser.parse_args()
 
     return args
