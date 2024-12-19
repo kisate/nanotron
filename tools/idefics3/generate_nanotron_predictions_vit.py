@@ -1,5 +1,5 @@
 """
-torchrun --nproc-per-node 1 tools/idefics3/generate_nanotron_predictions_vit.py --tp 1 --nanotron-checkpoint-path nanotron-ckpt-vit
+torchrun --nproc-per-node 1 tools/idefics3/generate_nanotron_predictions_vit.py --tp 1 --nanotron-checkpoint-path nanotron_checkpoints/Nanotron-CLIP
 """
 import argparse
 import os

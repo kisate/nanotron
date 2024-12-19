@@ -1,5 +1,5 @@
 """
-torchrun --nproc-per-node 2 tools/idefics3/loss_on_captions_nanotron.py --tp 2 --nanotron-checkpoint-path nanotron-ckpt --dataset-path "../datasets/ny_captions.hf"
+torchrun --nproc-per-node 2 tools/idefics3/loss_on_captions_nanotron.py --tp 2 --nanotron-checkpoint-path nanotron_checkpoints/Nanotron-Idefics3-8B-Llama3 --dataset-path "../datasets/ny_captions.hf"
 """
 import argparse
 import os

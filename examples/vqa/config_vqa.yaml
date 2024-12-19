@@ -46,7 +46,7 @@ model:
   ddp_bucket_cap_mb: 25
   dtype: bfloat16
   init_method:
-    path: nanotron-ckpt
+    path: nanotron_checkpoints/Nanotron-Idefics3-8B-Llama3
   make_vocab_size_divisible_by: 1
   model_config:
     image_token_id: 128257
