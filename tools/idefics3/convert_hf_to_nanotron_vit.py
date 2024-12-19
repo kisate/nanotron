@@ -1,5 +1,5 @@
 """
-HF_HUB_ENABLE_HF_TRANSFER=1 torchrun --nproc-per-node 1 tools/idefics3/convert_hf_to_nanotron_vit.py --nanotron-checkpoint-path nanotron-ckpt-vit --pretrained-model-name-or-path HuggingFaceM4/Idefics3-8B-Llama3
+HF_HUB_ENABLE_HF_TRANSFER=1 torchrun --nproc-per-node 1 tools/idefics3/convert_hf_to_nanotron_vit.py --nanotron-checkpoint-path nanotron_checkpoints/Nanotron-CLIP --pretrained-model-name-or-path HuggingFaceM4/Idefics3-8B-Llama3
 """
 import sys
 

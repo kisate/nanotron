@@ -1,5 +1,5 @@
 """
-torchrun --nproc-per-node 1 tools/idefics3/build_nanotron_from_hf.py --nanotron-checkpoint-path nanotron-ckpt --pretrained-model-name-or-path-llama3 meta-llama/Meta-Llama-3-8B-Instruct --pretrained-model-name-or-path-siglip google/siglip-so400m-patch14-384
+torchrun --nproc-per-node 1 tools/idefics3/build_nanotron_from_hf.py --nanotron-checkpoint-path nanotron_checkpoints/Nanotron-Idefics3-8B-Llama3 --pretrained-model-name-or-path-llama3 meta-llama/Meta-Llama-3-8B-Instruct --pretrained-model-name-or-path-siglip google/siglip-so400m-patch14-384
 """
 import sys
 sys.path.append('.venv/lib/python3.10/site-packages')

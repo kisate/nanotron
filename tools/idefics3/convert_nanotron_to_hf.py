@@ -1,5 +1,5 @@
 """
-torchrun --nproc-per-node 1 tools/idefics3/convert_nanotron_to_hf.py --huggingface-checkpoint-path idefics3_ckpt --pretrained-model-name-or-path nanotron-ckpt --hf-pretrained-model-name-or-path HuggingFaceM4/Idefics3-8B-Llama3
+torchrun --nproc-per-node 1 tools/idefics3/convert_nanotron_to_hf.py --huggingface-checkpoint-path idefics3_ckpt --pretrained-model-name-or-path nanotron_checkpoints/Nanotron-Idefics3-8B-Llama3
 """
 
 import sys
