@@ -178,60 +178,6 @@ def get_dataloader_from_data_stage(
         )
 
         return train_dataloader
-    
-    elif isinstance(data.dataset, ImageDatasetsArgs):
-        log_rank("Using iterable dataset from `datasets` library", logger=logger, level=logging.INFO, rank=0)
-        tokenizer_path = trainer.config.tokenizer.tokenizer_name_or_path
-        log_rank(
-            f"Loading tokenizer from {tokenizer_path} with HF version {hf_hub_version} and Transformers version {tf_version}",
-            logger=logger,
-            level=logging.INFO,
-            rank=0,
-        )
-
-        dataset = datasets.load_dataset(
-            data.dataset.hf_dataset_name_or_type,
-            data_dir=data.dataset.hf_dataset_data_dir,
-            split=data.dataset.hf_dataset_splits,
-            streaming=True
-        )
-
-        processor = AutoProcessor.from_pretrained(
-            tokenizer_path,
-            size={"longest_edge": data.dataset.image_size * data.dataset.image_scale_factor},
-        )
-
-        sample_encoder = SAMPLE_ENCODERS[data.dataset.sample_encoder](
-            processor=processor,
-            sequence_length=trainer.sequence_length,
-            **data.dataset.sample_encoder_args
-        )
-
-        batch_encoder = BATCH_ENCODERS[data.dataset.batch_encoder](
-            input_pp_rank=input_pp_rank,
-            output_pp_rank=output_pp_rank,
-            parallel_context=trainer.parallel_context,
-            processor=processor,
-            sequence_length=trainer.sequence_length,
-            **data.dataset.batch_encoder_args
-        )
-
-        dataloader = get_train_dataloader(
-            train_dataset=dataset,
-            sample_encoder=sample_encoder,
-            batch_encoder=batch_encoder,
-            parallel_context=trainer.parallel_context,
-            input_pp_rank=input_pp_rank,
-            output_pp_rank=output_pp_rank,
-            micro_batch_size=trainer.micro_batch_size,
-            sample_encoding_batch=data.dataset.sample_encoding_batch,
-            batch_encoding_batch=data.dataset.batch_encoding_batch,
-            seed_worker=data.seed,
-            sample_encoding_workers=data.dataset.sample_encoding_workers,
-            batch_encoding_workers=data.dataset.batch_encoding_workers,
-            consumed_train_samples=consumed_train_samples,
-            drop_last=True,
-        )
     else:
         raise ValueError(f"Unhandled case of `self.config.data.dataset`. Got: {data.dataset}")
 

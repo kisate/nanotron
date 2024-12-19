@@ -50,7 +50,7 @@ model:
   make_vocab_size_divisible_by: 1
   model_config:
     image_token_id: 128257
-    llama_config:
+    text_config:
       bos_token_id: 128000
       eos_token_id:
       - 128001

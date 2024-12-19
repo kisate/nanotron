@@ -1,16 +1,17 @@
-from abc import ABC
-from dataclasses import dataclass
 import io
-from typing import Any, Dict, List, TypedDict, Union
+from dataclasses import dataclass
+from typing import Any, Dict, List, Union
 
-import torch
-from nanotron.modular_dataloader.base import SampleEncoder, BatchEncoder
 import numpy as np
+import torch
+from PIL import Image
+from transformers import AutoProcessor
+
 from nanotron import distributed as dist
+from nanotron.modular_dataloader.base import BatchEncoder, SampleEncoder
 from nanotron.parallel.context import ParallelContext
 from nanotron.parallel.pipeline_parallel.tensor_pointer import TensorPointer
-from transformers import AutoProcessor
-from PIL import Image
+
 
 @dataclass
 class FormattedTextSample:
@@ -66,10 +67,10 @@ class ProcessSampleEncoder(SampleEncoder[ProcessedSample]):
         text = f"{image_token}{sample[self.text_field]}"
         image = sample[self.image_field]
         image_arr = byte_img_to_array(image)
-        inputs = self.processor(text=text, images=[image_arr], return_tensors="pt", padding="longest", max_length=self.sequence_length + 1, truncation=True) 
+        inputs = self.processor(text=text, images=[image_arr], return_tensors="pt", padding="longest", max_length=self.sequence_length + 1, truncation=True)
 
         return ProcessedSample(
-            input_ids=inputs["input_ids"], 
+            input_ids=inputs["input_ids"],
             pixel_values=inputs["pixel_values"]
     )
 
@@ -99,7 +100,7 @@ class PreprocessedSampleEncoder(SampleEncoder[ProcessedSample]):
             input_ids = input_ids.unsqueeze(0)
 
         return ProcessedSample(
-            input_ids=input_ids, 
+            input_ids=input_ids,
             pixel_values=pixel_values
         )
 
@@ -157,7 +158,7 @@ class SingleImageBatchEncoder(BatchEncoder[FormattedTextSample]):
         texts = [sample.text for sample in batch]
         images = [[byte_img_to_array(sample.image)] for sample in batch]
 
-        inputs = self.processor(text=texts, images=images, return_tensors="pt", padding="longest", max_length=self.sequence_length + 1, truncation=True) 
+        inputs = self.processor(text=texts, images=images, return_tensors="pt", padding="longest", max_length=self.sequence_length + 1, truncation=True)
 
 
         if current_pp_rank == self.input_pp_rank:
@@ -169,8 +170,8 @@ class SingleImageBatchEncoder(BatchEncoder[FormattedTextSample]):
             result["label_ids"] = inputs["input_ids"][:, 1:]
             result["label_mask"] = inputs["input_ids"][:, 1:] < self.processor.tokenizer.vocab_size
 
-        return result        
-    
+        return result
+
 
 @dataclass
 class PreprocessedCollator(BatchEncoder[ProcessedSample]):
@@ -215,7 +216,7 @@ class PreprocessedCollator(BatchEncoder[ProcessedSample]):
             # Make it divisible by tp group size
             gs = self.parallel_context.tp_pg.size()
             max_seq_len = max_seq_len + (gs - max_seq_len % gs) % gs
-            
+
             padded_token_ids = []
             padded_attention_mask = []
 
@@ -249,7 +250,7 @@ class PreprocessedCollator(BatchEncoder[ProcessedSample]):
 
             return padded_token_ids, padded_attention_mask
 
-            
+
 
         if current_pp_rank == self.input_pp_rank:
             max_n_patches = max(x.pixel_values.shape[1] for x in batch)
@@ -258,7 +259,7 @@ class PreprocessedCollator(BatchEncoder[ProcessedSample]):
             for example in batch:
                 pixel_values = example.pixel_values
                 current_patches = pixel_values.shape[1]
-                
+
                 # Pad the pixel_values to have max_n_patches along dimension 1 (patches)
                 padding = torch.zeros((1, max_n_patches - current_patches) + pixel_values.shape[2:], dtype=pixel_values.dtype, device=pixel_values.device)
                 padded_pixel_values.append(torch.cat([pixel_values, padding], dim=1))

@@ -1,7 +1,7 @@
 # Inspired by https://github.com/NVIDIA/Megatron-Energon
-from typing import Any, Callable, Dict, List, Tuple, TypeVar, Generic, TypedDict, Union
 from abc import ABC
-from datasets import Dataset
+from typing import Any, Dict, Generic, List, TypeVar, Union
+
 import torch
 from transformers import AutoProcessor
 

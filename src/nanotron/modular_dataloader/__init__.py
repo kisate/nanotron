@@ -1,4 +1,10 @@
-from .caption import CaptionSampleEncoder, ProcessSampleEncoder, SingleImageBatchEncoder, PreprocessedCollator, PreprocessedSampleEncoder
+from .caption import (
+    CaptionSampleEncoder,
+    PreprocessedCollator,
+    PreprocessedSampleEncoder,
+    ProcessSampleEncoder,
+    SingleImageBatchEncoder,
+)
 
 SAMPLE_ENCODERS = {
     "caption_simple": CaptionSampleEncoder,
